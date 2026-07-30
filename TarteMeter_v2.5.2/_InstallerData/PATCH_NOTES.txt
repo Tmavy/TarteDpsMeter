@@ -1,0 +1,19 @@
+TARTEMETER v2.5.2
+
+CRITICAL WPF THEME FIX
+- Fixed '#FF3A4B60' is not a valid value for property 'BorderBrush'.
+- Theme colors are valid; the failure occurred while replacing WPF
+  DynamicResource dictionary entries at runtime.
+- Apply-Theme now mutates the Color property of the existing XAML
+  SolidColorBrush resources instead of replacing resource objects.
+- This prevents WPF from reapplying brushes through style setters and
+  incorrectly converting them on Windows PowerShell 5.1.
+- New-Brush now uses the explicit SolidColorBrush constructor.
+- Saved-theme failures keep the valid XAML Midnight Gold resources and no
+  longer perform a second risky theme application during startup.
+
+DAMAGE REGISTRATION
+- Both UE4SS damage hook paths are unchanged.
+- HitLocation target matching, target LastAttacker, projectile/source ownership,
+  delayed damage attribution, total damage, DPS, hits, critical hits, highest
+  hit, encounter history, and exports are unchanged from v2.5.1.
