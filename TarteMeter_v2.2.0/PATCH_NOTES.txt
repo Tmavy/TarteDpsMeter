@@ -1,0 +1,33 @@
+TARTEMETER v2.2.0
+
+IMPORTANT CHANGES
+- Added a gear settings panel for opacity, click-through, always-on-top, and text size.
+- Renamed HISTORY to LOGS and removed the separate raw debug-log tab.
+- Removed SAVE/F7.
+- RESET saves the current encounter before clearing it.
+- A failed history write no longer destroys the current encounter.
+- Added stable character-specific colors for live damage bars.
+
+FREEZE REDUCTION
+- Removed duplicate F6 reset execution between UE4SS and the WPF overlay.
+- Cached and validated the player controller instead of searching every 250 ms.
+- Removed recurring full-world monster enumeration during combat.
+- Monster enumeration now occurs after map readiness and only when the cache expires
+  because all cached actors became invalid.
+- Added periodic pruning for cached transient projectile/attacker ownership.
+- Reduced roster scans, command-file checks, and unnecessary WPF file reads.
+- Retained buffered timeline output and throttled state updates.
+- Capped detailed in-memory history events for exceptionally long encounters.
+- Optimized event-grid and timeline rendering.
+
+CORRECTNESS
+- Fixed automatic-history duration and DPS so the 10-second idle detector is not
+  counted as combat time.
+- Fixed the automatic-save Lua function declaration order.
+- Kept the conservative damage-attribution rules unchanged.
+- Preserved transient character-row protection.
+- Avoided duplicate log entries after an encounter was already auto-saved.
+
+INSTALLER
+- Existing mods.txt entries are preserved.
+- Existing battle logs and window settings survive an update.
