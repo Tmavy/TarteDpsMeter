@@ -1,0 +1,28 @@
+TARTEMETER v2.6.0
+
+CRITICAL NATIVE CRASH FIX
+- Reworked combat-object lifetime handling after a UE4SS access-violation dump.
+- Removed the persistent player-controller UObject cache.
+- Removed the persistent monster UObject cache.
+- Removed actor references from the position cache.
+- Removed target UObjects from pending/delayed damage events.
+- ClientShowDamageText captures only numbers, strings, booleans, and coordinates.
+- After the 80 ms attribution delay, target and LastAttacker are reacquired via
+  ExecuteInGameThread using a fresh, callback-local world snapshot.
+- LoopAsync now performs only plain-Lua maintenance and file I/O.
+- A combat-generation guard prevents delayed events from crossing RESET.
+- Chako is excluded from enemy target candidates.
+
+CHAKO
+- Renamed Dana-Golem to Chako.
+- DsMon_Chaco_V2_C resolves to the separate Chako row from LastAttacker and
+  projectile/source ownership chains.
+- Chako attribution does not depend on the active character or swap timing.
+- Generic SWAP_CARRY_SECONDS remains 0.000.
+
+PRESERVED
+- Both established UE4SS damage hooks.
+- Target-specific LastAttacker and HitLocation matching.
+- Explicit source ownership and delayed attribution.
+- DPS, hits, critical hits, highest hit, automatic raid logs, history, exports,
+  themes, hotkeys, opacity, click-through, and adjustable LOGS timeline.

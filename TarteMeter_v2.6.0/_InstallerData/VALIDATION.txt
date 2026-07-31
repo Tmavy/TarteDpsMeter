@@ -1,0 +1,25 @@
+TarteMeter v2.6.0 static validation
+
+- Source v2.5.9 archive integrity: OK
+- Persistent controller UObject cache disabled: OK
+- Persistent monster UObject cache disabled: OK
+- Position actor cache disabled: OK
+- Delayed event contains plain Lua data only: OK
+- Target reacquisition through ExecuteInGameThread: OK
+- Background LoopAsync contains no UObject access: OK
+- Combat-generation RESET guard: OK
+- Chako separate row and exact class detection: OK
+- Chako excluded from enemy target snapshot: OK
+- Exactly two established UE4SS damage hooks: OK
+- Generic swap carry-over remains disabled: OK
+- Raid auto-save/history/export paths retained: OK
+- v2.5.8+ settings/themes retained: OK
+- English patch notes v2.5.5 through v2.6.0: OK
+- Embedded WPF XAML parsing: OK
+- Every DPSWindow FindName target exists: OK
+- Installer archive integrity: OK
+- Mod-only archive integrity: OK
+
+Runtime verification still requires Windows PowerShell 5.1, UE4SS 3.x, and
+DragonSword: Awakening. Native-crash elimination cannot be guaranteed without a
+runtime test, but the stale-UObject retention path found in the dump is removed.
