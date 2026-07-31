@@ -1,4 +1,0 @@
-This package bundles UE4SS v3.0.1 files supplied by the mod author.
-UE4SS project: UE4SS-RE/RE-UE4SS.
-The original UE4SS README and Changelog are included in Payload.
-Redistributors should review and comply with the UE4SS project license and all bundled dependency licenses before public distribution.
