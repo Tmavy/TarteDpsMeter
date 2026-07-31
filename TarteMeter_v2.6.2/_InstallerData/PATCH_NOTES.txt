@@ -1,0 +1,48 @@
+TARTEMETER v2.6.2
+
+CHAKO AFTER CHARACTER SWAPS
+- Fixed Chako damage being assigned to the currently active character after
+  switching away from Dana.
+- The projectile overlap hook now records OtherActor as a plain target key.
+- Source records are keyed by source and target, so one projectile can retain
+  independent ownership records for multiple enemies.
+- An exact Chako source + target match is evaluated before the batch-time
+  LastAttacker value.
+- This prevents a newly active character from overwriting LastAttacker before
+  the shared damage batch is resolved.
+- Chako can also be recognized from source classes containing the exact Chaco
+  token when the SourceActor owner chain is temporarily unavailable.
+- No UObject is stored in the source records or pending damage queue.
+- Generic SWAP_CARRY_SECONDS remains 0.000.
+
+ATTRIBUTION PRIORITY
+1. Exact target-matched Chako source.
+2. Target-specific LastAttacker.
+3. Target-compatible explicit projectile/source record.
+4. Captured active character as the final fallback.
+
+TIMELINE SCROLLING
+- The LOGS timeline no longer derives its width from the window viewport.
+- A battle now has the same horizontal scale at every window size.
+- Timeline width uses a fixed 96 pixels per second plus a density floor.
+- Content width is bounded between 1,400 and 24,000 pixels.
+- The existing horizontal scrollbar is always visible.
+- Resizing the main window no longer redraws or compresses the timeline.
+- Dragging the vertical timeline-size splitter still redraws the chart height.
+
+PERFORMANCE AND STABILITY
+- The v2.6.1 coalesced 512-hit batches remain unchanged.
+- One transient monster snapshot is still shared by each batch.
+- Source records remain keyed, bounded to 512, and pruned every 500 ms.
+- Exact source-target matching filters unrelated targets before timing checks.
+- No new world scan, polling loop, per-hit save, or persistent UObject cache was
+  added.
+- Timeline resizing no longer triggers repeated redraws during window resizing.
+
+PRESERVED
+- Total damage, DPS, hits, critical hits, critical rate, highest hit, average hit,
+  damage share, character colors, and Chako's separate row.
+- Raid auto-save, manual RESET protection, battle history, JSON/CSV export, and
+  current timeline export.
+- Adjustable LOGS height, themes, opacity, text scale, always-on-top,
+  click-through, configurable hotkeys, show/hide, installer, and update flow.
