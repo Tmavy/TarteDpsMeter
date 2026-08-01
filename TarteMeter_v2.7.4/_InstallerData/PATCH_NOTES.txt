@@ -1,0 +1,113 @@
+TARTEMETER v2.7.4
+
+CHAKO COMMAND-SKILL ATTRIBUTION
+
+- Dana-commanded Chako skills no longer use the active-pawn fast path by default.
+- While a confirmed Chako summon is present and Dana is active, target LastAttacker is refreshed on a throttled schedule.
+- A short plain-value target cache bridges multi-hit ticks between refreshes without retaining UObject references.
+- OnAttackBeginOverlap now resolves the concrete animation/projectile context before SourceActor.
+- Chako tokens are checked across both Context and SourceActor, covering command skills whose SourceActor still points to Dana.
+- Source records use the projectile/animation context identity instead of collapsing all command attacks into Dana's actor key.
+- Limited CHAKO_SOURCE_LINK diagnostics were added for failed test cases without enabling per-hit spam.
+
+OVERLAY PROCESS LIFECYCLE
+
+- The overlay records the DragonSword process ID when it opens.
+- When that exact game process exits, the WPF window closes and PowerShell terminates automatically.
+- The title-bar X now closes TarteMeter completely instead of hiding it.
+- F9 remains the dedicated show/hide control.
+- Every DispatcherTimer is stopped during shutdown, including the layout resize timer.
+- WPF application shutdown is requested after the window closes.
+
+PERFORMANCE SAFEGUARDS
+
+- No new combat hook was added; the build still uses only the two verified hooks.
+- Chako skill target probes are limited to Dana+Chako periods and throttled to at most one refresh per 220 ms for a hit region.
+- Cached target attribution stores only numbers and strings for 350 ms.
+- Normal direct-hit fast paths remain unchanged outside the Chako command-skill case.
+
+SESSION RESET HOTFIX
+
+- Ten seconds without damage now creates a rolling checkpoint only.
+- Idle detection no longer clears accumulated damage on the next hit.
+- Chako summon animations, boss phase transitions, movement, menus, and swaps can no longer start a fresh empty meter.
+- A resumed fight keeps the same totals, hit counters, critical counters, timeline, and original encounter start time.
+- Latest JSON/CSV files are still refreshed automatically during idle.
+- battle_history.jsonl receives the complete encounter once when RESET archives it, preventing duplicate partial history rows.
+
+CHAKO TARGET RESOLUTION HOTFIX
+- Allied summons are excluded from enemy target snapshots.
+- Chako remains a valid independent damage source.
+- Damage can no longer be discarded because Chako was selected as its own target.
+- Combat sessions begin only after a damage event is successfully attributed.
+- Empty summon events no longer create immediate save/reset cycles.
+
+BASE REBUILD
+Clean attribution and responsive layout rebuild
+
+COMBAT ATTRIBUTION
+- Exact SourceActor + target attribution now has priority for every character.
+  This fixes delayed/projectile damage being reassigned by a newer
+  batch-time LastAttacker value.
+- Chako remains a separate internal owner and separate UI row.
+- Chako overlap events seed a plain-string target lease, so a temporarily nil
+  or overwritten LastAttacker can still resolve to Chako after Dana is swapped.
+- A strict target-unresolved source fallback was added. It uses a narrow time
+  window and rejects ambiguous candidates from different owners.
+- Batch target ownership is no longer reused once for every event on the same
+  target. LastAttacker is read per unresolved event.
+- The captured active pawn remains the final fallback only.
+
+PERFORMANCE
+- Damage callbacks still enqueue only numbers, strings and booleans.
+- UObject references remain local to game-thread callbacks.
+- The verified 80 ms attribution defer is retained so late source callbacks can join the same batch.
+- Batch size reduced from 512 to 384 to limit long game-thread stalls.
+- FindAllOf("DsMonsterCharacter") is now conditional instead of unconditional:
+  it runs for swap-sensitive events, recent source events, unknown ownership,
+  or a periodic target-name probe.
+- Normal direct-hit batches use the captured active pawn without a world scan.
+- Source records, owner traversal, history events and queues remain bounded.
+- State snapshots remain throttled and timeline writes remain batched.
+- Production logging remains quiet.
+
+WINDOW AND ACCESSIBILITY
+- Text size range expanded from 80-140% to 60-220%.
+- Row heights, headers, title bar, summary bar, footer and controls adapt to
+  the selected text size.
+- Damage, history and log columns collapse by priority on narrow windows.
+  Character names, DMG and DPS are preserved first.
+- Default window size increased; minimum size reduced for compact overlays.
+- Banner and footer helper text hide automatically in very narrow layouts.
+- Theme resources are mutated in place to make theme changes apply reliably.
+- Hard-coded white/accent text in the main XAML was replaced with theme
+  resources.
+- Timeline keeps a fixed pixels-per-second scale and remains horizontally
+  scrollable.
+
+PACKAGING
+- English VBS/PowerShell installer retained; no custom EXE bootstrapper.
+- Setup validates the v2.7.4 window and v274 single-instance mutex.
+- Existing history, exports, themes, hotkeys and settings are preserved.
+- window_settings_v7.ini automatically migrates v6/v5/v4/v3 settings.
+
+NOT INCLUDED
+- Multiplayer replication repair is not included in this combat release.
+- Boss HP/SA/Shield capture remains a separate diagnostic work item.
+RESET / BOSS ACTOR CONTINUITY
+- Boss actor IDs and temporary hazard actors never reset the encounter.
+- A changed actor with the same boss name updates metadata only.
+- Different transient targets must be repeatedly confirmed before replacing the displayed enemy.
+- clear_values() now requires a private authorization token and is reachable only through manual RESET.
+
+INSTALL MIGRATION / DUPLICATE HOOK SAFETY
+- Setup verifies the exact SHA-256 of installed main.lua and DPSWindow.ps1.
+- Old DragonSwordDPSMeter/TarteDpsMeter enabled.txt markers are disabled.
+- TarteMeter uses mods.txt only; its own enabled.txt is removed to prevent duplicate discovery.
+- A process-wide Lua guard blocks duplicate runtime initialization.
+
+CRASH-SAFETY AUDIT
+- Stale delayed batches skip FindAllOf during possible loading/world teardown.
+- Monster snapshots are capped at 1024 enemy actors per batch.
+- Timeline and recent-target queues have hard bounds if disk writes stall.
+- No new gameplay hooks were added; only the two verified hooks remain.

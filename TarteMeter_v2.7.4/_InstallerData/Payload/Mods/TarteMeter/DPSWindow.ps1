@@ -11,11 +11,13 @@ $showRequestPath = Join-Path $PSScriptRoot "overlay_show.request"
 $iconPath = Join-Path $PSScriptRoot "Assets\TarteMeter.ico"
 $portraitPath = Join-Path $PSScriptRoot "Assets\tarte.png"
 $bannerPath = Join-Path $PSScriptRoot "Assets\banner.png"
-$settingsPath = Join-Path $PSScriptRoot "window_settings_v6.ini"
+$settingsPath = Join-Path $PSScriptRoot "window_settings_v7.ini"
+$legacySettingsPathV6 = Join-Path $PSScriptRoot "window_settings_v6.ini"
 $legacySettingsPathV5 = Join-Path $PSScriptRoot "window_settings_v5.ini"
 $legacySettingsPathV4 = Join-Path $PSScriptRoot "window_settings_v4.ini"
 $legacySettingsPathV3 = Join-Path $PSScriptRoot "window_settings_v3.ini"
 $windowBuildPath = Join-Path $PSScriptRoot "window_build.txt"
+$runtimeVersionPath = Join-Path $PSScriptRoot "runtime_version.txt"
 
 function Write-StartupDiagnostic {
     param([string]$Stage, [string]$Details = "")
@@ -36,12 +38,12 @@ function Write-StartupDiagnostic {
 
 try { Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue } catch {}
 Write-StartupDiagnostic "DPSWindow.ps1 entered" ("PowerShell " + $PSVersionTable.PSVersion)
-Write-StartupDiagnostic "Startup architecture" "detached PowerShell; overlay mutex v262; build 2.6.2"
+Write-StartupDiagnostic "Startup architecture" "detached PowerShell; overlay mutex v274; build 2.7.4"
 
 $createdNew = $false
 $instanceMutex = New-Object System.Threading.Mutex(
     $true,
-    "Local\TarteMeterOverlay_v262",
+    "Local\TarteMeterOverlay_v274",
     [ref]$createdNew
 )
 if (-not $createdNew) {
@@ -156,6 +158,10 @@ $script:syncingHotkeyControls = $false
 $script:overlayVisible = $true
 $script:lastSettingsSaveSucceeded = $true
 $script:forceClose = $false
+$script:gameProcessName = "DSClient-Win64-Shipping"
+$script:gameProcessId = 0
+$script:gameProcessStartTime = $null
+$script:gameWatchInitialized = $false
 $script:maxHistoryRows = 200
 $script:maxTimelineMarkers = 500
 $script:maxEventRows = 2500
@@ -174,6 +180,82 @@ $script:settings = [ordered]@{
     OverlayHotkey = "F9"
     PassHotkey = "F10"
     LogTimelineHeight = 92.0
+}
+
+function Initialize-GameProcessWatch {
+    try {
+        $candidates = @(
+            Get-Process -Name $script:gameProcessName -ErrorAction SilentlyContinue |
+                Sort-Object StartTime -Descending
+        )
+
+        if ($candidates.Count -le 0) {
+            Write-StartupDiagnostic "Game process watch" (
+                "No running " + $script:gameProcessName + " process was found; " +
+                "automatic shutdown is disabled for this overlay instance."
+            )
+            $script:gameWatchInitialized = $true
+            return
+        }
+
+        $gameProcess = $candidates[0]
+        $script:gameProcessId = [int]$gameProcess.Id
+        try { $script:gameProcessStartTime = $gameProcess.StartTime }
+        catch { $script:gameProcessStartTime = $null }
+        $script:gameWatchInitialized = $true
+
+        Write-StartupDiagnostic "Game process watch" (
+            "Watching PID " + $script:gameProcessId +
+            " (" + $script:gameProcessName + ")"
+        )
+    }
+    catch {
+        $script:gameWatchInitialized = $true
+        Write-StartupDiagnostic "Game process watch warning" $_.Exception.Message
+    }
+}
+
+function Test-WatchedGameProcessAlive {
+    if (-not $script:gameWatchInitialized) {
+        Initialize-GameProcessWatch
+    }
+
+    if ($script:gameProcessId -le 0) {
+        return $true
+    }
+
+    try {
+        $process = Get-Process -Id $script:gameProcessId -ErrorAction Stop
+        if ($null -ne $script:gameProcessStartTime) {
+            try {
+                if ($process.StartTime -ne $script:gameProcessStartTime) {
+                    return $false
+                }
+            }
+            catch {}
+        }
+        return (-not $process.HasExited)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Close-OverlayProcess {
+    param([string]$Reason)
+
+    if ($script:forceClose) { return }
+    $script:forceClose = $true
+    Write-StartupDiagnostic "Overlay process closing" $Reason
+
+    try { $window.Close() }
+    catch {
+        Write-StartupDiagnostic "Overlay close warning" $_.Exception.Message
+        try {
+            [Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown()
+        }
+        catch {}
+    }
 }
 
 function Convert-ToNumber {
@@ -342,7 +424,7 @@ function Import-SettingsFile {
             }
             "TextScale" {
                 $value = Convert-ToNumber $valueText
-                if ($value -ge 80 -and $value -le 140) {
+                if ($value -ge 60 -and $value -le 220) {
                     $script:settings.TextScale = $value
                 }
             }
@@ -390,6 +472,7 @@ function Import-SettingsFile {
 function Read-WindowSettings {
     try {
         if (Import-SettingsFile $settingsPath) { return }
+        if (Import-SettingsFile $legacySettingsPathV6) { return }
         if (Import-SettingsFile $legacySettingsPathV5) { return }
         if (Import-SettingsFile $legacySettingsPathV4) { return }
 
@@ -458,11 +541,11 @@ Read-WindowSettings
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:sys="clr-namespace:System;assembly=mscorlib"
-        Title="TarteMeter v2.6.2"
-        Width="690"
-        Height="410"
-        MinWidth="560"
-        MinHeight="340"
+        Title="TarteMeter v2.7.4"
+        Width="840"
+        Height="460"
+        MinWidth="430"
+        MinHeight="280"
         WindowStyle="None"
         WindowStartupLocation="CenterScreen"
         ShowInTaskbar="True"
@@ -480,6 +563,8 @@ Read-WindowSettings
   <sys:Double x:Key="MeterTextMedium">11</sys:Double>
   <sys:Double x:Key="MeterTextTitle">12</sys:Double>
   <sys:Double x:Key="MeterTextStat">13</sys:Double>
+  <sys:Double x:Key="MeterRowInnerHeight">19</sys:Double>
+  <sys:Double x:Key="MeterControlHeight">22</sys:Double>
   <SolidColorBrush x:Key="ThemeWindowBrush" Color="#101722"/>
   <SolidColorBrush x:Key="ThemeChromeBrush" Color="#151F2D"/>
   <SolidColorBrush x:Key="ThemePanelBrush" Color="#172332"/>
@@ -506,6 +591,7 @@ Read-WindowSettings
    <Setter Property="Padding" Value="7,2"/>
    <Setter Property="FontSize" Value="{DynamicResource MeterTextNormal}"/>
    <Setter Property="FontWeight" Value="SemiBold"/>
+   <Setter Property="MinHeight" Value="{DynamicResource MeterControlHeight}"/>
   </Style>
   <Style TargetType="CheckBox">
    <Setter Property="Foreground" Value="{DynamicResource ThemeTextBrush}"/>
@@ -518,6 +604,7 @@ Read-WindowSettings
    <Setter Property="BorderBrush" Value="{DynamicResource ThemeBorderBrush}"/>
    <Setter Property="FontSize" Value="{DynamicResource MeterTextNormal}"/>
    <Setter Property="Padding" Value="5,1"/>
+   <Setter Property="MinHeight" Value="{DynamicResource MeterControlHeight}"/>
   </Style>
   <Style TargetType="ComboBoxItem">
    <Setter Property="Foreground" Value="{DynamicResource ThemeTextBrush}"/>
@@ -649,10 +736,10 @@ Read-WindowSettings
          ClipToBounds="True">
   <Grid>
    <Grid.RowDefinitions>
-    <RowDefinition Height="34"/>
-    <RowDefinition Height="48"/>
+    <RowDefinition x:Name="TitleBarRow" Height="34"/>
+    <RowDefinition x:Name="SummaryRow" Height="48"/>
     <RowDefinition Height="*"/>
-    <RowDefinition Height="27"/>
+    <RowDefinition x:Name="FooterRow" Height="27"/>
    </Grid.RowDefinitions>
 
    <Grid x:Name="TitleBar" Grid.Row="0" Background="{DynamicResource ThemeChromeBrush}">
@@ -678,7 +765,7 @@ Read-WindowSettings
              CornerRadius="6"
              Padding="5,1"
              Margin="6,0,0,0">
-      <TextBlock Text="v2.6.0"
+      <TextBlock Text="v2.7.4"
                  FontSize="{DynamicResource MeterTextSmall}"
                  Foreground="{DynamicResource ThemeAccentTextBrush}"/>
      </Border>
@@ -735,7 +822,7 @@ Read-WindowSettings
               BorderThickness="1.4"/>
      </Button>
      <Button x:Name="CloseButton"
-             ToolTip="Hide meter (use the overlay hotkey to reopen)"
+             ToolTip="Close TarteMeter completely"
              Width="27"
              Background="Transparent"
              BorderThickness="0"
@@ -803,7 +890,7 @@ Read-WindowSettings
        <TextBlock Text="DPS / TIME"
                   FontSize="{DynamicResource MeterTextSmall}"
                   FontWeight="Bold"
-                  Foreground="#8DB3D1"/>
+                  Foreground="{DynamicResource ThemeAccentTextBrush}"/>
        <TextBlock x:Name="DpsText"
                   Text="0 / 0.0s"
                   FontSize="{DynamicResource MeterTextStat}"
@@ -830,7 +917,7 @@ Read-WindowSettings
         <DataGridTemplateColumn.CellTemplate>
          <DataTemplate>
           <Grid Margin="1,0"
-                Height="19"
+                MinHeight="{DynamicResource MeterRowInnerHeight}"
                 ClipToBounds="True"
                 ToolTip="{Binding ShareTooltip}">
            <Border Width="4"
@@ -845,7 +932,7 @@ Read-WindowSettings
                       FontSize="{DynamicResource MeterTextNormal}"
                       FontFamily="Bahnschrift SemiBold, Segoe UI Semibold"
                       FontWeight="SemiBold"
-                      Foreground="#FFFFFF"/>
+                      Foreground="{DynamicResource ThemeTextBrush}"/>
           </Grid>
          </DataTemplate>
         </DataGridTemplateColumn.CellTemplate>
@@ -861,7 +948,7 @@ Read-WindowSettings
                         Value="{Binding ShareNumber}"
                         Foreground="{Binding BarBrush}"/>
            <TextBlock Text="{Binding Share}"
-                      Foreground="#FFFFFF"
+                      Foreground="{DynamicResource ThemeTextBrush}"
                       FontWeight="SemiBold"
                       FontSize="{DynamicResource MeterTextSmall}"
                       HorizontalAlignment="Center"
@@ -958,7 +1045,7 @@ Read-WindowSettings
                      FontWeight="Bold"/>
           <TextBlock x:Name="LogTotalDamageText"
                      Text="0"
-                     Foreground="#FFFFFF"
+                     Foreground="{DynamicResource ThemeTextBrush}"
                      FontSize="{DynamicResource MeterTextStat}"
                      FontWeight="Bold"/>
          </StackPanel>
@@ -967,12 +1054,12 @@ Read-WindowSettings
                      VerticalAlignment="Center"
                      Margin="6,0,0,0">
           <TextBlock Text="DPS"
-                     Foreground="#8DB3D1"
+                     Foreground="{DynamicResource ThemeAccentTextBrush}"
                      FontSize="{DynamicResource MeterTextSmall}"
                      FontWeight="Bold"/>
           <TextBlock x:Name="LogDpsText"
                      Text="0"
-                     Foreground="#FFFFFF"
+                     Foreground="{DynamicResource ThemeTextBrush}"
                      FontSize="{DynamicResource MeterTextStat}"
                      FontWeight="Bold"/>
          </StackPanel>
@@ -986,7 +1073,7 @@ Read-WindowSettings
                      FontWeight="Bold"/>
           <TextBlock x:Name="LogDurationText"
                      Text="0.0s"
-                     Foreground="#FFFFFF"
+                     Foreground="{DynamicResource ThemeTextBrush}"
                      FontSize="{DynamicResource MeterTextStat}"
                      FontWeight="Bold"/>
          </StackPanel>
@@ -1000,7 +1087,7 @@ Read-WindowSettings
                      FontWeight="Bold"/>
           <TextBlock x:Name="LogCritText"
                      Text="0.0%"
-                     Foreground="#FFFFFF"
+                     Foreground="{DynamicResource ThemeTextBrush}"
                      FontSize="{DynamicResource MeterTextStat}"
                      FontWeight="Bold"/>
          </StackPanel>
@@ -1038,7 +1125,7 @@ Read-WindowSettings
           <DataGridTemplateColumn.CellTemplate>
            <DataTemplate>
             <Grid Margin="1,0"
-                  Height="19"
+                  MinHeight="{DynamicResource MeterRowInnerHeight}"
                   ClipToBounds="True"
                   ToolTip="{Binding ShareTooltip}">
              <Border Width="4"
@@ -1053,7 +1140,7 @@ Read-WindowSettings
                         FontSize="{DynamicResource MeterTextNormal}"
                         FontFamily="Bahnschrift SemiBold, Segoe UI Semibold"
                         FontWeight="SemiBold"
-                        Foreground="#FFFFFF"/>
+                        Foreground="{DynamicResource ThemeTextBrush}"/>
             </Grid>
            </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
@@ -1069,7 +1156,7 @@ Read-WindowSettings
                           Value="{Binding ShareNumber}"
                           Foreground="{Binding BarBrush}"/>
              <TextBlock Text="{Binding Share}"
-                        Foreground="#FFFFFF"
+                        Foreground="{DynamicResource ThemeTextBrush}"
                         FontWeight="SemiBold"
                         FontSize="{DynamicResource MeterTextSmall}"
                         HorizontalAlignment="Center"
@@ -1238,14 +1325,14 @@ Read-WindowSettings
                    VerticalAlignment="Center"/>
         <ComboBox x:Name="ThemeCombo"
                   Grid.Column="1"
-                  Height="24"
+                  MinHeight="{DynamicResource MeterControlHeight}"
                   Margin="0,0,6,0"
                   IsReadOnly="True"
                   ToolTip="Choose one of three dark color designs"/>
         <Button x:Name="ApplyThemeButton"
                 Grid.Column="2"
                 Content="APPLY"
-                Height="24"/>
+                MinHeight="{DynamicResource MeterControlHeight}"/>
        </Grid>
 
        <TextBlock x:Name="ThemeStatusText"
@@ -1292,10 +1379,10 @@ Read-WindowSettings
                    VerticalAlignment="Center"/>
         <Slider x:Name="TextScaleSlider"
                 Grid.Column="1"
-                Minimum="80"
-                Maximum="140"
+                Minimum="60"
+                Maximum="220"
                 Value="100"
-                TickFrequency="10"
+                TickFrequency="5"
                 Height="20"/>
         <TextBlock x:Name="TextScaleText"
                    Grid.Column="2"
@@ -1335,7 +1422,7 @@ Read-WindowSettings
                    VerticalAlignment="Center"/>
         <ComboBox x:Name="ResetHotkeyCombo"
                   Grid.Column="1"
-                  Height="23"
+                  MinHeight="{DynamicResource MeterControlHeight}"
                   IsEditable="False"
                   IsTextSearchEnabled="True"/>
        </Grid>
@@ -1351,7 +1438,7 @@ Read-WindowSettings
                    VerticalAlignment="Center"/>
         <ComboBox x:Name="OverlayHotkeyCombo"
                   Grid.Column="1"
-                  Height="23"
+                  MinHeight="{DynamicResource MeterControlHeight}"
                   IsEditable="False"
                   IsTextSearchEnabled="True"/>
        </Grid>
@@ -1367,7 +1454,7 @@ Read-WindowSettings
                    VerticalAlignment="Center"/>
         <ComboBox x:Name="PassHotkeyCombo"
                   Grid.Column="1"
-                  Height="23"
+                  MinHeight="{DynamicResource MeterControlHeight}"
                   IsEditable="False"
                   IsTextSearchEnabled="True"/>
        </Grid>
@@ -1381,13 +1468,13 @@ Read-WindowSettings
 
        <Button x:Name="ApplyHotkeysButton"
                Content="APPLY KEY BINDINGS"
-               Height="24"
+               MinHeight="{DynamicResource MeterControlHeight}"
                HorizontalAlignment="Stretch"
                Margin="0,0,0,6"/>
 
        <Button x:Name="ExitButton"
                Content="EXIT TARTEMETER PROCESS"
-               Height="24"
+               MinHeight="{DynamicResource MeterControlHeight}"
                HorizontalAlignment="Stretch"
                ToolTip="Completely close the overlay process. Start the game or mod again to reopen it."/>
       </StackPanel>
@@ -1420,9 +1507,13 @@ catch {
 }
 
 $TitleBar = $window.FindName("TitleBar")
+$TitleBarRow = $window.FindName("TitleBarRow")
+$SummaryRow = $window.FindName("SummaryRow")
+$FooterRow = $window.FindName("FooterRow")
 $SettingsButton = $window.FindName("SettingsButton")
 $SettingsCloseButton = $window.FindName("SettingsCloseButton")
 $SettingsPanel = $window.FindName("SettingsPanel")
+$SettingsHeaderRow = $window.FindName("SettingsHeaderRow")
 $ResizeTopLeft = $window.FindName("ResizeTopLeft")
 $ResizeTop = $window.FindName("ResizeTop")
 $ResizeTopRight = $window.FindName("ResizeTopRight")
@@ -1542,6 +1633,13 @@ $timelineResizeTimer.Add_Tick({
     }
 })
 
+$layoutResizeTimer = New-Object Windows.Threading.DispatcherTimer
+$layoutResizeTimer.Interval = [TimeSpan]::FromMilliseconds(120)
+$layoutResizeTimer.Add_Tick({
+    $layoutResizeTimer.Stop()
+    Update-AdaptiveLayout
+})
+
 $hotkeyApplyTimer = New-Object Windows.Threading.DispatcherTimer
 $hotkeyApplyTimer.Interval = [TimeSpan]::FromMilliseconds(180)
 $hotkeyApplyTimer.Add_Tick({
@@ -1638,12 +1736,21 @@ function Apply-Theme {
     foreach ($entry in $theme.GetEnumerator()) {
         $resourceKey = [string]$entry.Key
         $newColor = Convert-ToWpfColor -Hex ([string]$entry.Value)
-        $newBrush = [Windows.Media.SolidColorBrush]::new($newColor)
+        $existing = $window.Resources[$resourceKey]
 
-        if ($window.Resources.Contains($resourceKey)) {
-            [void]$window.Resources.Remove($resourceKey)
+        if (
+            $existing -is [Windows.Media.SolidColorBrush] -and
+            -not $existing.IsFrozen
+        ) {
+            $existing.Color = $newColor
         }
-        $window.Resources.Add($resourceKey, $newBrush)
+        else {
+            $newBrush = [Windows.Media.SolidColorBrush]::new($newColor)
+            if ($window.Resources.Contains($resourceKey)) {
+                [void]$window.Resources.Remove($resourceKey)
+            }
+            $window.Resources.Add($resourceKey, $newBrush)
+        }
     }
 
     $script:settings.Theme = $name
@@ -2060,7 +2167,7 @@ function Process-OverlayShowRequest {
         Show-OverlayWindow
         [IO.File]::WriteAllText(
             $readyPath,
-            ("TarteMeter v2.6.2 ready | " + [DateTime]::Now.ToString("o")),
+            ("TarteMeter v2.7.4 ready | " + [DateTime]::Now.ToString("o")),
             [Text.Encoding]::UTF8
         )
         Write-StartupDiagnostic "Existing window shown by request"
@@ -2070,27 +2177,150 @@ function Process-OverlayShowRequest {
     }
 }
 
+function Set-DataGridColumn {
+    param(
+        [object]$Grid,
+        [int]$Index,
+        [bool]$Visible,
+        [double]$Width,
+        [double]$MinWidth = 0.0,
+        [bool]$Star = $false
+    )
+
+    if ($null -eq $Grid -or $Grid.Columns.Count -le $Index) {
+        return
+    }
+
+    $column = $Grid.Columns[$Index]
+    if ($Visible) {
+        $column.Visibility = [Windows.Visibility]::Visible
+        $column.MinWidth = $MinWidth
+        if ($Star) {
+            $column.Width = [Windows.Controls.DataGridLength]::new(
+                1.0,
+                [Windows.Controls.DataGridLengthUnitType]::Star
+            )
+        }
+        else {
+            $column.Width = [Windows.Controls.DataGridLength]::new($Width)
+        }
+    }
+    else {
+        $column.Visibility = [Windows.Visibility]::Collapsed
+    }
+}
+
+function Update-AdaptiveLayout {
+    $actualWidth = [double]$window.ActualWidth
+    if (
+        [double]::IsNaN($actualWidth) -or
+        [double]::IsInfinity($actualWidth) -or
+        $actualWidth -le 0
+    ) {
+        $actualWidth = [double]$window.Width
+    }
+
+    $scale = [Math]::Max(
+        0.60,
+        [Math]::Min(2.20, [double]$script:settings.TextScale / 100.0)
+    )
+    $columnScale = [Math]::Max(0.78, [Math]::Min(1.72, $scale))
+    $effectiveWidth = $actualWidth / [Math]::Max(1.0, $scale)
+
+    # DAMAGE: preserve character, DMG and DPS first. Lower-priority analytical
+    # columns collapse progressively instead of squeezing character names away.
+    Set-DataGridColumn $DamageGrid 0 $true 0 ([Math]::Max(115, 150 * $columnScale)) $true
+    Set-DataGridColumn $DamageGrid 1 $true (74 * $columnScale) 58
+    Set-DataGridColumn $DamageGrid 2 $true (64 * $columnScale) 52
+    Set-DataGridColumn $DamageGrid 3 ($effectiveWidth -ge 500) (96 * $columnScale) 72
+    Set-DataGridColumn $DamageGrid 4 ($effectiveWidth -ge 585) (48 * $columnScale) 38
+    Set-DataGridColumn $DamageGrid 5 ($effectiveWidth -ge 650) (54 * $columnScale) 42
+    Set-DataGridColumn $DamageGrid 6 ($effectiveWidth -ge 730) (70 * $columnScale) 54
+    Set-DataGridColumn $DamageGrid 7 ($effectiveWidth -ge 810) (70 * $columnScale) 54
+
+    # HISTORY: target and core totals remain visible in compact mode.
+    Set-DataGridColumn $HistoryGrid 0 ($effectiveWidth -ge 620) (132 * $columnScale) 96
+    Set-DataGridColumn $HistoryGrid 1 $true 0 ([Math]::Max(110, 140 * $columnScale)) $true
+    Set-DataGridColumn $HistoryGrid 2 ($effectiveWidth -ge 500) (62 * $columnScale) 48
+    Set-DataGridColumn $HistoryGrid 3 $true (82 * $columnScale) 64
+    Set-DataGridColumn $HistoryGrid 4 $true (72 * $columnScale) 58
+    Set-DataGridColumn $HistoryGrid 5 ($effectiveWidth -ge 700) (88 * $columnScale) 66
+
+    # LOG DETAILS use the same priority order as DAMAGE.
+    Set-DataGridColumn $LogCharacterGrid 0 ($effectiveWidth -ge 470) (32 * $columnScale) 26
+    Set-DataGridColumn $LogCharacterGrid 1 $true 0 ([Math]::Max(110, 145 * $columnScale)) $true
+    Set-DataGridColumn $LogCharacterGrid 2 $true (76 * $columnScale) 58
+    Set-DataGridColumn $LogCharacterGrid 3 $true (66 * $columnScale) 52
+    Set-DataGridColumn $LogCharacterGrid 4 ($effectiveWidth -ge 500) (96 * $columnScale) 72
+    Set-DataGridColumn $LogCharacterGrid 5 ($effectiveWidth -ge 650) (54 * $columnScale) 42
+    Set-DataGridColumn $LogCharacterGrid 6 ($effectiveWidth -ge 585) (48 * $columnScale) 38
+    Set-DataGridColumn $LogCharacterGrid 7 ($effectiveWidth -ge 730) (70 * $columnScale) 54
+    Set-DataGridColumn $LogCharacterGrid 8 ($effectiveWidth -ge 810) (70 * $columnScale) 54
+
+    $settingsWidth = [Math]::Max(
+        310.0,
+        [Math]::Min(
+            [Math]::Max(310.0, $actualWidth - 18.0),
+            365.0 * [Math]::Max(1.0, [Math]::Min(1.60, $scale))
+        )
+    )
+    $SettingsPanel.Width = $settingsWidth
+
+    if ($actualWidth -lt 560) {
+        $BannerImage.Visibility = [Windows.Visibility]::Collapsed
+        $HotkeyFooterText.Visibility = [Windows.Visibility]::Collapsed
+    }
+    else {
+        $BannerImage.Visibility = [Windows.Visibility]::Visible
+        $HotkeyFooterText.Visibility = [Windows.Visibility]::Visible
+    }
+}
+
 function Set-TextScale {
     param([double]$Percent)
 
-    $Percent = [Math]::Max(80.0, [Math]::Min(140.0, $Percent))
+    $Percent = [Math]::Max(60.0, [Math]::Min(220.0, $Percent))
     $scale = $Percent / 100.0
     $script:settings.TextScale = $Percent
 
-    $window.Resources["MeterTextSmall"] = [double](8.0 * $scale)
-    $window.Resources["MeterTextNormal"] = [double](9.0 * $scale)
-    $window.Resources["MeterTextMedium"] = [double](11.0 * $scale)
-    $window.Resources["MeterTextTitle"] = [double](12.0 * $scale)
-    $window.Resources["MeterTextStat"] = [double](13.0 * $scale)
+    $window.Resources["MeterTextSmall"] = [double][Math]::Max(6.0, 8.0 * $scale)
+    $window.Resources["MeterTextNormal"] = [double][Math]::Max(7.0, 9.0 * $scale)
+    $window.Resources["MeterTextMedium"] = [double][Math]::Max(8.0, 11.0 * $scale)
+    $window.Resources["MeterTextTitle"] = [double][Math]::Max(9.0, 12.0 * $scale)
+    $window.Resources["MeterTextStat"] = [double][Math]::Max(10.0, 13.0 * $scale)
+    $window.Resources["MeterRowInnerHeight"] = [double][Math]::Max(17.0, 20.0 * $scale)
+    $window.Resources["MeterControlHeight"] = [double][Math]::Max(20.0, 24.0 * $scale)
 
-    $rowHeight = [Math]::Max(23.0, 23.0 * $scale)
-    $headerHeight = [Math]::Max(23.0, 23.0 * $scale)
+    $rowHeight = [Math]::Max(22.0, 26.0 * $scale)
+    $headerHeight = [Math]::Max(22.0, 25.0 * $scale)
     foreach ($grid in @($DamageGrid, $HistoryGrid, $LogCharacterGrid)) {
         $grid.RowHeight = $rowHeight
         $grid.ColumnHeaderHeight = $headerHeight
     }
 
+    if ($null -ne $TitleBarRow) {
+        $TitleBarRow.Height = [Windows.GridLength]::new(
+            [Math]::Max(34.0, 35.0 * $scale)
+        )
+    }
+    if ($null -ne $SummaryRow) {
+        $SummaryRow.Height = [Windows.GridLength]::new(
+            [Math]::Max(48.0, 52.0 * $scale)
+        )
+    }
+    if ($null -ne $FooterRow) {
+        $FooterRow.Height = [Windows.GridLength]::new(
+            [Math]::Max(27.0, 30.0 * $scale)
+        )
+    }
+    if ($null -ne $SettingsHeaderRow) {
+        $SettingsHeaderRow.Height = [Windows.GridLength]::new(
+            [Math]::Max(32.0, 34.0 * $scale)
+        )
+    }
+
     $TextScaleText.Text = "{0:0}%" -f $Percent
+    Update-AdaptiveLayout
 }
 
 function Toggle-SettingsPanel {
@@ -3054,6 +3284,21 @@ Sync-HotkeyControls
 Update-HotkeyLabels
 Write-StartupDiagnostic "Theme and hotkey controls initialized"
 
+try {
+    if (Test-Path -LiteralPath $runtimeVersionPath) {
+        $runtimeVersion = (Get-Content -LiteralPath $runtimeVersionPath -TotalCount 1 -ErrorAction Stop).Trim()
+        if ($runtimeVersion -ne "TarteMeter v2.7.4") {
+            Write-StartupDiagnostic "Runtime version mismatch" ("expected=TarteMeter v2.7.4 actual=" + $runtimeVersion)
+        }
+        else {
+            Write-StartupDiagnostic "Runtime version" $runtimeVersion
+        }
+    }
+}
+catch {
+    Write-StartupDiagnostic "Runtime version check failed" $_.Exception.Message
+}
+
 $OpacitySlider.Value = $script:settings.Opacity
 $OpacityText.Text = "{0:0}%" -f $script:settings.Opacity
 $window.Opacity = [Math]::Max(
@@ -3086,8 +3331,7 @@ $SettingsCloseButton.Add_Click({
     $SettingsPanel.Visibility = [Windows.Visibility]::Collapsed
 })
 $ExitButton.Add_Click({
-    $script:forceClose = $true
-    $window.Close()
+    Close-OverlayProcess "settings exit button"
 })
 $applyThemeChange = {
     if ($null -eq $ThemeCombo.SelectedItem) { return }
@@ -3101,7 +3345,7 @@ $applyThemeChange = {
 
         if (-not (Write-WindowSettings)) {
             throw (
-                "The theme was applied, but window_settings_v6.ini " +
+                "The theme was applied, but window_settings_v7.ini " +
                 "could not be saved."
             )
         }
@@ -3145,7 +3389,7 @@ $MinimizeButton.Add_Click({
     $window.WindowState = [Windows.WindowState]::Minimized
 })
 $MaximizeButton.Add_Click({ Toggle-MaximizeRestore })
-$CloseButton.Add_Click({ Hide-OverlayWindow })
+$CloseButton.Add_Click({ Close-OverlayProcess "title-bar close button" })
 
 $TitleBar.Add_MouseLeftButtonDown({
     param($sender, $eventArgs)
@@ -3175,6 +3419,16 @@ $LogTimelineSplitter.Add_DragCompleted({
         [Math]::Min(320.0, $LogTimelineRow.ActualHeight)
     )
     Queue-SettingsSave
+
+    if ($null -ne $script:selectedBattle) {
+        $timelineResizeTimer.Stop()
+        $timelineResizeTimer.Start()
+    }
+})
+
+$window.Add_SizeChanged({
+    $layoutResizeTimer.Stop()
+    $layoutResizeTimer.Start()
 
     if ($null -ne $script:selectedBattle) {
         $timelineResizeTimer.Stop()
@@ -3265,6 +3519,12 @@ $window.Add_SourceInitialized({
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(750)
 $timer.Add_Tick({
+    if (-not (Test-WatchedGameProcessAlive)) {
+        $timer.Stop()
+        Close-OverlayProcess "DragonSword process exited"
+        return
+    }
+
     Process-OverlayShowRequest
     Update-MeterIfChanged
     Update-HistoryIfChanged
@@ -3272,11 +3532,12 @@ $timer.Add_Tick({
 
 $window.Add_Loaded({
     Write-StartupDiagnostic "Window Loaded event"
+    Initialize-GameProcessWatch
 
     try {
         [IO.File]::WriteAllText(
             $windowBuildPath,
-            "TarteMeter v2.6.2 | mutex v262",
+            "TarteMeter v2.7.4 | mutex v274",
             [Text.Encoding]::ASCII
         )
         [void](Write-WindowSettings)
@@ -3295,7 +3556,7 @@ $window.Add_Loaded({
     try {
         [IO.File]::WriteAllText(
             $readyPath,
-            ("TarteMeter v2.6.2 ready | " + [DateTime]::Now.ToString("o")),
+            ("TarteMeter v2.7.4 ready | " + [DateTime]::Now.ToString("o")),
             [Text.Encoding]::UTF8
         )
     }
@@ -3310,6 +3571,7 @@ $window.Add_Closed({
     $timer.Stop()
     $settingsSaveTimer.Stop()
     $timelineResizeTimer.Stop()
+    $layoutResizeTimer.Stop()
     $hotkeyApplyTimer.Stop()
     try { Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue } catch {}
     [void](Write-WindowSettings)
@@ -3321,6 +3583,13 @@ $window.Add_Closed({
         $instanceMutex.Dispose()
         $instanceMutex = $null
     }
+
+    try {
+        if ($null -ne [Windows.Application]::Current) {
+            [Windows.Application]::Current.Shutdown()
+        }
+    }
+    catch {}
 })
 
 try {

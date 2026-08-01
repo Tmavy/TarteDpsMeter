@@ -1,0 +1,32 @@
+TarteMeter v2.7.4 validation
+
+STATIC VALIDATION PERFORMED
+- Lua source loads successfully through the system Lua 5.4 parser.
+- Embedded XAML is well-formed XML.
+- Exactly two verified RegisterHook paths remain in the production parser.
+- ClientShowDamageText still queues scalar values only.
+- Source and target caches retain only strings, numbers, booleans and tables.
+- No UObject is stored in a long-lived queue or cache.
+- OnAttackBeginOverlap resolves Context before SourceActor.
+- Chako source tokens are evaluated across Context and SourceActor.
+- Chako command-skill target probes are restricted to confirmed Dana+Chako periods.
+- Chako target refresh is throttled to 220 ms and target cache lifetime is 350 ms.
+- Exact source-target attribution still precedes target LastAttacker.
+- Allied summons remain excluded from enemy target snapshots.
+- Idle checkpoints do not clear accumulated damage.
+- Manual RESET remains the normal cumulative-meter clear path.
+- Overlay watches the exact DragonSword process ID captured at startup.
+- Title-bar X and settings Exit both close the WPF process.
+- All DispatcherTimers are stopped during window shutdown.
+- Text scale limits remain 60 and 220.
+- Timeline remains fixed-scale and horizontally scrollable.
+- Installer version, overlay title, badge and mutex are consistent.
+- Package SHA-256 manifest was regenerated after all modifications.
+
+NOT VALIDATED IN THIS ENVIRONMENT
+- Live DragonSword gameplay and Chako skill behavior.
+- UE4SS hook behavior on a running game build.
+- Windows PowerShell/WPF rendering and Task Manager process exit.
+- Frame-time and memory behavior in a real large boss encounter.
+
+Use TEST_CHECKLIST.txt and return UE4SS.log for any failed case.

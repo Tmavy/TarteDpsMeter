@@ -1,0 +1,87 @@
+TARTEMETER v2.7.4 - IN-GAME TEST CHECKLIST
+
+A. INSTALLATION
+[ ] Fresh install with no previous TarteMeter
+[ ] Update over v2.6.x preserves history and settings
+[ ] Existing UE4SS installation is preserved
+[ ] Overlay opens without a visible command window
+[ ] Window title and badge both show v2.7.4
+
+B. BASIC DAMAGE
+[ ] One normal attack is assigned to the active character
+[ ] Incoming player damage is ignored
+[ ] Critical hits increment CRIT correctly
+[ ] A character row appears only after dealing damage
+[ ] Reset archives once and does not duplicate an auto-saved encounter
+
+C. CHARACTER SWITCHES
+[ ] Character A attacks, switch to B, then B attacks
+[ ] A delayed skill started by A remains assigned to A
+[ ] Theresa delayed/projectile damage is not assigned to Tarte
+[ ] Rapid A/B attacks on one target do not merge into one owner
+
+D. DANA / CHAKO
+[ ] Summon Chako and let Chako attack while Dana is active
+[ ] Switch from Dana to another character without attacking
+[ ] Chako continues to record damage after the switch
+[ ] Chako damage does not disappear
+[ ] Chako damage does not move to the new active character
+[ ] New active character attacks remain separate from simultaneous Chako hits
+
+E. PERFORMANCE
+[ ] Large multi-hit boss attacks do not freeze the game
+[ ] Ten minutes of combat does not continuously increase memory
+[ ] No repeated HOOK_CALLBACK_ERROR or MONSTER_SNAPSHOT_ERROR lines
+[ ] No duplicate overlay or duplicate combat hooks
+[ ] UI updates remain smooth during burst damage
+
+F. WINDOW
+[ ] Text slider works from 60% to 220%
+[ ] At 220%, rows and title bars do not clip text
+[ ] At narrow width, CHARACTER / DMG / DPS remain visible
+[ ] Expanding the window restores secondary columns
+[ ] All three themes change the full window palette
+[ ] Timeline scale does not compress when resizing the window
+[ ] Horizontal timeline scrolling works
+[ ] Click-through, opacity and hotkeys persist after restart
+
+SEND BACK AFTER TESTING
+- Mods\TarteMeter\dps_meter.txt
+- UE4SS.log
+- window_error.txt, if created
+- Exact test sequence and which character/skill was used
+
+
+IDLE / SUMMON RESET TEST
+[ ] Deal damage with any character and note the total.
+[ ] Wait at least 12 seconds without attacking.
+[ ] Summon Chako or use another long animation.
+[ ] Deal damage again.
+[ ] Previous totals and timeline remain present.
+[ ] Press RESET manually and confirm only then the totals clear.
+
+
+G. CHAKO COMMAND SKILL
+[ ] Summon Chako while Dana is active.
+[ ] Record several Chako auto-attacks in the separate CHAKO row.
+[ ] Cast Dana's skill that commands Chako to spin.
+[ ] Every spin tick is added to CHAKO, not Dana.
+[ ] Immediately use one normal Dana attack and confirm it remains Dana.
+[ ] Repeat after switching away and back to Dana.
+[ ] UE4SS.log contains no repeated MONSTER_SNAPSHOT_ERROR or HOOK_CALLBACK_ERROR.
+
+H. PROCESS SHUTDOWN
+[ ] Click the title-bar X and confirm TarteMeter disappears from Task Manager.
+[ ] Reopen the game and confirm a new overlay starts normally.
+[ ] Close DragonSword without manually closing TarteMeter.
+[ ] Within approximately two seconds, powershell.exe for DPSWindow.ps1 exits.
+[ ] Steam no longer reports DragonSword as running because of TarteMeter.
+
+UPDATE / RESET CONTINUITY
+[ ] After install, Mods\TarteMeter\installed_version.txt says TarteMeter v2.7.4
+[ ] dps_meter.txt first line says TarteMeter v2.7.4
+[ ] No AUTO_RESET_AFTER_SAVE appears in dps_meter.txt
+[ ] Stop attacking for 15 seconds, let the boss cast a phase/hazard, then continue: totals remain
+[ ] Boss/hazard actor ID changes do not clear Damage, Hits, Crits, or Timeline
+[ ] Only RESET clears the encounter
+[ ] Only one HOOK_OK line exists for each of the two combat hooks

@@ -4,7 +4,7 @@ $script:DataDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:PayloadDir = [IO.Path]::Combine($script:DataDir, "Payload")
 $script:ModPayload = [IO.Path]::Combine($script:PayloadDir, "Mods", "TarteMeter")
 $script:UE4SSPayload = [IO.Path]::Combine($script:PayloadDir, "UE4SS")
-$script:Version = "2.6.2"
+$script:Version = "2.7.4"
 $script:FatalLog = [IO.Path]::Combine($script:DataDir, "InstallerError.log")
 $script:LogBox = $null
 $script:StatusLabel = $null
@@ -235,7 +235,7 @@ function Merge-ModsTxt {
     $lines = @()
     if ([IO.File]::Exists($modsTxt)) {
         $lines = @([IO.File]::ReadAllLines($modsTxt) | Where-Object {
-            $_ -notmatch '^\s*(DragonSwordDPSMeter|TarteMeter)\s*:'
+            $_ -notmatch '^\s*(DragonSwordDPSMeter|DragonswordDPSMeter|TarteDPSMeter|TarteDpsMeter|TarteMeter)\s*:'
         })
     }
     $lines += 'TarteMeter : 1'
@@ -244,6 +244,40 @@ function Merge-ModsTxt {
         $lines,
         $script:Utf8NoBom
     )
+}
+
+function Get-FileSha256 {
+    param([string]$Path)
+
+    if (-not [IO.File]::Exists($Path)) { return $null }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $stream.Dispose() }
+    }
+    finally { $sha.Dispose() }
+}
+
+function Disable-LegacyCombatMods {
+    param([string]$ModsDirectory)
+
+    foreach ($folderName in @(
+        'DragonSwordDPSMeter',
+        'DragonswordDPSMeter',
+        'TarteDPSMeter',
+        'TarteDpsMeter'
+    )) {
+        $legacyFolder = Join-NativePath $ModsDirectory $folderName
+        $legacyEnabled = Join-NativePath $legacyFolder 'enabled.txt'
+        if ([IO.File]::Exists($legacyEnabled)) {
+            $disabledPath = Join-NativePath $legacyFolder 'enabled.txt.disabled-by-tartemeter-v274'
+            Move-Item -LiteralPath $legacyEnabled -Destination $disabledPath -Force
+            Write-SetupLog ("Disabled legacy combat mod enable marker: {0}" -f $legacyEnabled)
+        }
+    }
 }
 
 function Install-TarteMeter {
@@ -325,6 +359,14 @@ function Install-TarteMeter {
     }
 
     Stop-TarteMeterOverlay $GameExe
+    Disable-LegacyCombatMods $modsDir
+
+    # mods.txt is the only enable mechanism. Keeping both mods.txt and a local
+    # enabled.txt can load the same Lua runtime twice on some UE4SS builds.
+    $ownEnabled = Join-NativePath $modTarget 'enabled.txt'
+    if ([IO.File]::Exists($ownEnabled)) {
+        Remove-Item -LiteralPath $ownEnabled -Force
+    }
 
     Write-SetupLog 'Installing TarteMeter files...'
     New-Item -ItemType Directory -Path $modTarget -Force | Out-Null
@@ -333,6 +375,16 @@ function Install-TarteMeter {
         New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target)) -Force | Out-Null
         [IO.File]::Copy($file.Source, $target, $true)
     }
+
+    $ownEnabled = Join-NativePath $modTarget 'enabled.txt'
+    if ([IO.File]::Exists($ownEnabled)) {
+        Remove-Item -LiteralPath $ownEnabled -Force
+    }
+    [IO.File]::WriteAllText(
+        (Join-NativePath $modTarget 'installed_version.txt'),
+        ('TarteMeter v' + $script:Version + [Environment]::NewLine),
+        $script:Utf8NoBom
+    )
 
     Merge-ModsTxt $modsDir
 
@@ -351,20 +403,44 @@ function Install-TarteMeter {
     $installedWindowText = [IO.File]::ReadAllText($installedWindowScript)
     if (
         $installedWindowText.IndexOf(
-            'TarteMeter v2.6.2',
+            'TarteMeter v2.7.4',
             [StringComparison]::Ordinal
         ) -lt 0 -or
         $installedWindowText.IndexOf(
-            'TarteMeterOverlay_v262',
+            'TarteMeterOverlay_v274',
             [StringComparison]::Ordinal
         ) -lt 0
     ) {
         throw (
-            'The v2.5.8 overlay script was not installed correctly. ' +
+            'The v2.7.4 overlay script was not installed correctly. ' +
             'Close every old TarteMeter PowerShell process and run setup again.'
         )
     }
-    Write-SetupLog 'Verified the installed v2.6.2 overlay script and mutex.'
+    $installedMain = Join-NativePath $modTarget 'Scripts' 'main.lua'
+    $payloadMain = Join-NativePath $script:ModPayload 'Scripts' 'main.lua'
+    $installedMainText = [IO.File]::ReadAllText($installedMain)
+    if (
+        $installedMainText.IndexOf('TarteMeter v2.7.4', [StringComparison]::Ordinal) -lt 0 -or
+        $installedMainText.IndexOf('runtime_singleton_guard=true', [StringComparison]::Ordinal) -lt 0 -or
+        $installedMainText.IndexOf('AUTO_RESET_AFTER_SAVE', [StringComparison]::Ordinal) -ge 0
+    ) {
+        throw 'The installed combat runtime is stale or invalid. Close the game and run Install / Update again.'
+    }
+
+    $payloadMainHash = Get-FileSha256 $payloadMain
+    $installedMainHash = Get-FileSha256 $installedMain
+    $payloadWindowHash = Get-FileSha256 (Join-NativePath $script:ModPayload 'DPSWindow.ps1')
+    $installedWindowHash = Get-FileSha256 $installedWindowScript
+    if (
+        [string]::IsNullOrWhiteSpace($payloadMainHash) -or
+        $payloadMainHash -ne $installedMainHash -or
+        [string]::IsNullOrWhiteSpace($payloadWindowHash) -or
+        $payloadWindowHash -ne $installedWindowHash
+    ) {
+        throw 'Installed TarteMeter program files did not match the v2.7.4 payload.'
+    }
+
+    Write-SetupLog 'Verified v2.7.4 main.lua, overlay, hashes, reset guard, and single-instance identifiers.'
 
 
     # Remove the obsolete visible CMD helper from older releases. The meter
@@ -489,7 +565,7 @@ function Uninstall-TarteMeter {
     $modsTxt = Join-NativePath $modsDir 'mods.txt'
     if ([IO.File]::Exists($modsTxt)) {
         $lines = @([IO.File]::ReadAllLines($modsTxt) | Where-Object {
-            $_ -notmatch '^\s*(DragonSwordDPSMeter|TarteMeter)\s*:'
+            $_ -notmatch '^\s*(DragonSwordDPSMeter|DragonswordDPSMeter|TarteDPSMeter|TarteDpsMeter|TarteMeter)\s*:'
         })
         [IO.File]::WriteAllLines(
             $modsTxt,

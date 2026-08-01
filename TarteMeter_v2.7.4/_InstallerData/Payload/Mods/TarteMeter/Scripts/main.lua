@@ -1,4 +1,18 @@
-local MOD_NAME = "TarteMeter v2.6.2"
+local MOD_NAME = "TarteMeter v2.7.4"
+-- UE4SS can discover the same mod through more than one enable mechanism.
+-- A process-wide guard prevents duplicate combat hooks in one game process.
+if _G ~= nil and _G["__TARTE_METER_RUNTIME_ACTIVE"] ~= nil then
+    print(string.format(
+        "[DS DPS] DUPLICATE_RUNTIME_BLOCKED existing=%s requested=%s",
+        tostring(_G["__TARTE_METER_RUNTIME_ACTIVE"]),
+        MOD_NAME
+    ))
+    return
+end
+if _G ~= nil then
+    _G["__TARTE_METER_RUNTIME_ACTIVE"] = MOD_NAME
+end
+
 local LOG_FILE = "Mods/TarteMeter/dps_meter.txt"
 local STATE_FILE = "Mods/TarteMeter/dps_state.txt"
 local STATE_TMP = "Mods/TarteMeter/dps_state.tmp"
@@ -10,10 +24,28 @@ local TIMELINE_FILE = "Mods/TarteMeter/current_timeline.csv"
 local EXPORT_CSV_FILE = "Mods/TarteMeter/latest_battle.csv"
 local EXPORT_JSON_FILE = "Mods/TarteMeter/latest_battle.json"
 
--- Automatic combat-end archiving is enabled; manual RESET remains available.
+local SAFETY = {
+    world_scan_max_event_age_seconds = 1.000,
+    monster_snapshot_max_actors = 1024,
+    timeline_pending_hard_limit = 4096,
+    recent_target_cache_max_entries = 64,
+    enemy_transient_hold_seconds = 12.0,
+    enemy_candidate_window_seconds = 2.0,
+    enemy_candidate_confirm_hits = 4,
+    enemy_candidate_key = nil,
+    enemy_candidate_name = nil,
+    enemy_candidate_hits = 0,
+    enemy_candidate_time = -999.0,
+    timeline_lines_dropped = 0,
+    timeline_pressure_logged = false,
+    stale_world_scan_logged = false,
+    reset_token = {}
+}
+
+-- Idle detection creates rolling checkpoints only; it never clears totals. Manual RESET is the only normal encounter boundary.
 local DAMAGE_DEFER_SECONDS = 0.080
-local DAMAGE_BATCH_MAX_EVENTS = 512
-local DAMAGE_BATCH_CONTINUATION_MS = 4
+local DAMAGE_BATCH_MAX_EVENTS = 384
+local DAMAGE_BATCH_CONTINUATION_MS = 3
 local DAMAGE_QUEUE_HARD_LIMIT = 16384
 local TARGET_MATCH_CELL_SIZE = 20.0
 local SOURCE_KEEP_SECONDS = 6.000
@@ -23,6 +55,15 @@ local SOURCE_AFTER_DAMAGE_SECONDS = 0.120
 local SOURCE_MATCH_WINDOW_SECONDS = 1.500
 local SOURCE_BURST_REUSE_SECONDS = 0.900
 local SOURCE_BURST_MAX_HITS = 16
+local CHAKO_SOURCE_MATCH_WINDOW_SECONDS = 3.000
+local CHAKO_SOURCE_BURST_REUSE_SECONDS = 2.000
+local CHAKO_SOURCE_BURST_MAX_HITS = 64
+local STRICT_SOURCE_MATCH_SECONDS = 0.220
+local STRICT_CHAKO_MATCH_SECONDS = 0.400
+local STRICT_SOURCE_AMBIGUITY_SECONDS = 0.025
+local SWAP_RESOLUTION_SECONDS = 2.500
+local TARGET_PROBE_SECONDS = 1.250
+
 
 -- Tarte's deployed orbs can produce delayed or spaced damage callbacks.
 -- Use a wider continuation window only for a source already verified as Tarte.
@@ -48,6 +89,14 @@ local DANA_GOLEM_OWNER_TOKEN = "DsMCTR_C"
 local DANA_GOLEM_DISPLAY = "Chako"
 local DANA_GOLEM_SOURCE_TOKEN = "Chaco"
 local DANA_GOLEM_TARGET_GRACE_SECONDS = 2.500
+-- Once Chako has been seen, Dana's command skills need target attribution
+-- even when no projectile overlap is emitted for the individual damage tick.
+-- The lease is refreshed by every confirmed Chako source or committed hit.
+local CHAKO_PRESENCE_SECONDS = 45.000
+local CHAKO_DANA_TARGET_REFRESH_SECONDS = 0.220
+local TARGET_ATTRIBUTION_CACHE_SECONDS = 0.350
+local TARGET_ATTRIBUTION_CACHE_CELL_SIZE = 260.0
+local TARGET_ATTRIBUTION_CACHE_MAX_DISTANCE = 750.0
 local ALLIED_SUMMON_TARGET_TOKENS = {
     "DsMon_Chaco_V2_C",
     "DsMon_Kalien_Large_Fox_C",
@@ -56,17 +105,10 @@ local ALLIED_SUMMON_TARGET_TOKENS = {
 local MAX_HISTORY_EVENTS = 25000
 local VERBOSE_DAMAGE_LOG = false
 
--- A fight is considered finished after this much time without outgoing damage.
--- Long fights are archived automatically; shorter fights are archived when RESET is used.
+-- After this idle time, write a rolling latest checkpoint only.
+-- Damage, timeline, and encounter identity continue when combat resumes.
 local COMBAT_END_IDLE_SECONDS = 10.000
 local AUTO_SAVE_MIN_DURATION_SECONDS = 0.000
-
--- Heuristic for lingering attacks when the game exposes no SourceActor event.
--- After a swap, low/periodic damage can remain assigned to the previous hero
--- for this short window. Direct attacks by the new hero end the carryover.
-local SWAP_CARRY_SECONDS = 0.000
-local CARRY_SMALL_DAMAGE_MAX = 3000.0
-local NEW_ACTIVE_DIRECT_DAMAGE_MIN = 5000.0
 
 local active_pc = -1
 local active_name = "Unknown"
@@ -102,18 +144,21 @@ local session_finished = false
 local session_start_time = 0.0
 local session_end_time = 0.0
 local last_outgoing_damage_time = -999.0
-local session_auto_saved = false
 local event_no = 0
 local timeline_pending_lines = {}
 local timeline_last_flush = 0.0
 local TIMELINE_FLUSH_SECONDS = 1.000
 local TIMELINE_FLUSH_MAX_LINES = 512
+
 local script_start_time = os.clock()
 local window_launched = false
 local last_state_write = -999.0
 local last_command_poll = -999.0
 local last_owner_cache_prune = -999.0
 local last_source_prune = -999.0
+local latest_source_time = -999.0
+local latest_chako_source_time = -999.0
+local last_target_probe_time = -999.0
 local owner_resolution_cache = {}
 local attribution_diagnostic_count = 0
 local source_diagnostic_count = 0
@@ -122,14 +167,11 @@ local hook_callback_error_count = 0
 local special_summon_logged = {}
 local special_target_owner_cache = {}
 local state_dirty = true
-local previous_active_name = nil
 local swap_time = -999.0
-local carryover_enabled = false
-local transition_active = false
-local transition_until = -999.0
-local missing_controller_since = nil
-local MAP_RELOAD_GRACE_SECONDS = 3.0
-local CONTROLLER_MISSING_CONFIRM_SECONDS = 0.75
+local last_chako_presence_time = -999.0
+-- Plain Lua values only. No UObject is retained between game-thread batches.
+local recent_target_attribution = {}
+local chako_source_link_log_count = 0
 
 -- Internal UE class tokens -> player-facing names.
 local DISPLAY_ALIASES = {
@@ -199,6 +241,14 @@ local function reset_log_file()
         f:write("time | event# | type | details\n")
         f:close()
     end
+
+    pcall(function()
+        local version_file = io.open("Mods/TarteMeter/runtime_version.txt", "w")
+        if version_file then
+            version_file:write(MOD_NAME .. "\n")
+            version_file:close()
+        end
+    end)
 end
 
 local function fname_to_string(fname)
@@ -206,23 +256,6 @@ local function fname_to_string(fname)
     local converted = safe_call(function() return fname:ToString() end, nil)
     if converted ~= nil then return tostring(converted) end
     return tostring(fname)
-end
-
-local function value_to_string(value)
-    if value == nil then return nil end
-
-    local converted = safe_call(function()
-        return value:ToString()
-    end, nil)
-
-    if converted ~= nil then
-        local text = tostring(converted)
-        if text ~= "" and text ~= "None" then return text end
-    end
-
-    local text = tostring(value)
-    if text == "" or text == "nil" or text == "None" then return nil end
-    return text
 end
 
 local function clean_enemy_name(text)
@@ -390,15 +423,32 @@ local function build_monster_snapshot()
 
             if valid then
                 local x, y, z = actor_xyz(monster)
-                if x ~= nil then
+                local allied = is_allied_summon_actor(monster)
+                if allied and is_chako_actor(monster) then
+                    -- Seeing the live summon in a target scan is enough to arm
+                    -- Dana's command-skill attribution before Chako's first
+                    -- auto-attack has produced a confirmed damage owner.
+                    last_chako_presence_time = math.max(
+                        last_chako_presence_time,
+                        now()
+                    )
+                end
+
+                -- Allied summons such as Chako are valid damage sources, but
+                -- they must never participate in hit-location target matching.
+                -- Including them allowed the nearest-target resolver to select
+                -- Chako itself and discard Chako's outgoing hit as friendly.
+                if x ~= nil and not allied then
                     snapshot[#snapshot + 1] = {
                         actor = monster,
                         key = object_key(monster),
-                        allied = is_allied_summon_actor(monster),
                         x = x,
                         y = y,
                         z = z
                     }
+                    if #snapshot >= SAFETY.monster_snapshot_max_actors then
+                        break
+                    end
                 end
             end
         end
@@ -514,38 +564,6 @@ local function clear_pending_damage_events()
     damage_queue_overflow_logged = false
 end
 
-local function enter_map_transition(reason)
-    local t = now()
-    if not transition_active then
-        transition_active = true
-        transition_until = t + MAP_RELOAD_GRACE_SECONDS
-        source_records = {}
-        source_record_count = 0
-        source_record_sequence = 0
-        clear_pending_damage_events()
-        owner_resolution_cache = {}
-        attribution_diagnostic_count = 0
-        source_diagnostic_count = 0
-        allied_target_diagnostic_count = 0
-        special_summon_logged = {}
-        special_target_owner_cache = {}
-        last_owner_cache_prune = -999.0
-        last_source_prune = -999.0
-        carryover_enabled = false
-        previous_active_name = nil
-        active_pc = -1
-        active_name = "Unknown"
-        active_internal = nil
-        current_enemy_name = "Unknown"
-        current_enemy_time = -999.0
-        last_enemy_object_key = nil
-        state_dirty = true
-        append_line("MAP_TRANSITION", reason or "controller unavailable")
-    else
-        transition_until = math.max(transition_until, t + 0.5)
-    end
-end
-
 local function resolve_character_object(obj)
     if obj == nil then return nil, nil, nil end
 
@@ -577,6 +595,13 @@ local function get_property(obj, property_name)
     end, nil)
 end
 
+local function note_chako_presence(t)
+    local seen_time = tonumber(t) or now()
+    if seen_time > last_chako_presence_time then
+        last_chako_presence_time = seen_time
+    end
+end
+
 local function resolve_special_summon_owner(obj, path)
     if obj == nil then return nil, nil end
 
@@ -594,6 +619,8 @@ local function resolve_special_summon_owner(obj, path)
     if not exact_golem then
         return nil, nil
     end
+
+    note_chako_presence(now())
 
     local controller = get_property(obj, "Owner")
     local controller_class = object_class_name(controller)
@@ -621,30 +648,16 @@ local function resolve_special_summon_owner(obj, path)
     )
 end
 
-local ENEMY_NAME_PROPERTIES = {
-    "DisplayName",
-    "CharacterName",
-    "MonsterName",
-    "UnitName",
-    "Name",
-    "NickName",
-    "ActorName"
-}
-
 local function resolve_enemy_display_name(monster)
     if monster == nil then return "Unknown" end
 
-    for _, property_name in ipairs(ENEMY_NAME_PROPERTIES) do
-        local raw = get_property(monster, property_name)
-        local readable = clean_enemy_name(value_to_string(raw))
-        if readable ~= nil then return readable end
-    end
+    -- Avoid speculative property probing on enemy objects. Class/object names
+    -- are stable enough for display and require fewer native UObject reads.
+    local readable_class = clean_enemy_name(object_class_name(monster))
+    if readable_class ~= nil then return readable_class end
 
     local readable_object = clean_enemy_name(object_name(monster))
     if readable_object ~= nil then return readable_object end
-
-    local readable_class = clean_enemy_name(object_class_name(monster))
-    if readable_class ~= nil then return readable_class end
 
     return "Unknown"
 end
@@ -653,18 +666,85 @@ local function set_current_enemy(monster)
     if monster == nil then return end
 
     local key = object_key(monster)
-    if key == last_enemy_object_key and current_enemy_name ~= "Unknown" then
-        current_enemy_time = now()
+    local name = resolve_enemy_display_name(monster)
+    if name == nil or name == "Unknown" then return end
+
+    local t = now()
+
+    -- Actor IDs can change during boss phases or spawned hazards. Enemy
+    -- identity is display metadata only and can never reset an encounter.
+    if current_enemy_name == "Unknown" then
+        last_enemy_object_key = key
+        current_enemy_name = name
+        current_enemy_time = t
+        SAFETY.enemy_candidate_key = nil
+        SAFETY.enemy_candidate_name = nil
+        SAFETY.enemy_candidate_hits = 0
+        state_dirty = true
         return
     end
 
-    local name = resolve_enemy_display_name(monster)
-    if name ~= nil and name ~= "Unknown" then
+    if name == current_enemy_name then
+        if key ~= last_enemy_object_key then
+            append_line(
+                "ENEMY_ACTOR_ID_CHANGED",
+                string.format(
+                    "name=%s old=%s new=%s encounter_continues=true",
+                    current_enemy_name,
+                    tostring(last_enemy_object_key),
+                    tostring(key)
+                )
+            )
+        end
         last_enemy_object_key = key
-        current_enemy_name = name
-        current_enemy_time = now()
-        state_dirty = true
+        current_enemy_time = t
+        SAFETY.enemy_candidate_key = nil
+        SAFETY.enemy_candidate_name = nil
+        SAFETY.enemy_candidate_hits = 0
+        return
     end
+
+    -- A fire tornado, add, or temporary phase actor must not replace the boss
+    -- label after one hit. Confirm a different target repeatedly, or accept it
+    -- only after the previous target has been absent for a meaningful period.
+    if key == SAFETY.enemy_candidate_key
+        and name == SAFETY.enemy_candidate_name
+        and (t - SAFETY.enemy_candidate_time) <= SAFETY.enemy_candidate_window_seconds
+    then
+        SAFETY.enemy_candidate_hits = SAFETY.enemy_candidate_hits + 1
+    else
+        SAFETY.enemy_candidate_key = key
+        SAFETY.enemy_candidate_name = name
+        SAFETY.enemy_candidate_hits = 1
+    end
+    SAFETY.enemy_candidate_time = t
+
+    local previous_is_recent =
+        (t - current_enemy_time) <= SAFETY.enemy_transient_hold_seconds
+    if previous_is_recent
+        and SAFETY.enemy_candidate_hits < SAFETY.enemy_candidate_confirm_hits
+    then
+        return
+    end
+
+    append_line(
+        "ENEMY_DISPLAY_CHANGED",
+        string.format(
+            "from=%s to=%s old_id=%s new_id=%s confirmed_hits=%d encounter_continues=true",
+            current_enemy_name,
+            name,
+            tostring(last_enemy_object_key),
+            tostring(key),
+            SAFETY.enemy_candidate_hits
+        )
+    )
+    last_enemy_object_key = key
+    current_enemy_name = name
+    current_enemy_time = t
+    SAFETY.enemy_candidate_key = nil
+    SAFETY.enemy_candidate_name = nil
+    SAFETY.enemy_candidate_hits = 0
+    state_dirty = true
 end
 
 local function resolve_owner_chain(root)
@@ -905,6 +985,15 @@ local function prune_owner_resolution_cache(force)
             special_target_owner_cache[key] = nil
         end
     end
+
+    for key, entry in pairs(recent_target_attribution) do
+        if entry == nil
+            or (t - (entry.time or -999.0))
+                > TARGET_ATTRIBUTION_CACHE_SECONDS
+        then
+            recent_target_attribution[key] = nil
+        end
+    end
 end
 
 local function infer_from_roster_tokens(class_name)
@@ -952,9 +1041,7 @@ local function update_active_character_from_controller(pc)
         local old_idx = active_pc
         local old_name = active_name
 
-        previous_active_name = old_name
         swap_time = now()
-        carryover_enabled = false
 
         active_pc = idx
         active_name = display
@@ -962,7 +1049,7 @@ local function update_active_character_from_controller(pc)
         state_dirty = true
 
         append_line("ACTIVE_CHARACTER", string.format(
-            "from=%d:%s to=%d:%s internal=%s pawn_class=%s carryover=false",
+            "from=%d:%s to=%d:%s internal=%s pawn_class=%s",
             old_idx,
             old_name or "nil",
             active_pc,
@@ -1035,6 +1122,11 @@ local function remember_source(
     local item = source_records[record_key]
 
     source_record_sequence = source_record_sequence + 1
+    latest_source_time = math.max(latest_source_time, t)
+    if owner == DANA_GOLEM_DISPLAY then
+        latest_chako_source_time = math.max(latest_chako_source_time, t)
+        note_chako_presence(t)
+    end
 
     if item ~= nil then
         item.time = t
@@ -1076,6 +1168,138 @@ local function remember_source(
     return item, true
 end
 
+local function is_resolved_target_key(key)
+    return key ~= nil
+        and key ~= ""
+        and key ~= "nil"
+        and key ~= "unresolved"
+end
+
+local function target_attribution_bucket_key(hx, hy, hz)
+    if hx == nil or hy == nil or hz == nil then
+        return nil
+    end
+
+    local cell = TARGET_ATTRIBUTION_CACHE_CELL_SIZE
+    return string.format(
+        "%d:%d:%d",
+        math.floor((hx / cell) + 0.5),
+        math.floor((hy / cell) + 0.5),
+        math.floor((hz / cell) + 0.5)
+    )
+end
+
+local function get_recent_target_attribution(event)
+    if event == nil then return nil end
+
+    local bucket = target_attribution_bucket_key(
+        event.hit_x,
+        event.hit_y,
+        event.hit_z
+    )
+    if bucket == nil then return nil end
+
+    local item = recent_target_attribution[bucket]
+    if item ~= nil then
+        local age = event.time - (item.time or -999.0)
+        if age >= -SOURCE_AFTER_DAMAGE_SECONDS
+            and age <= TARGET_ATTRIBUTION_CACHE_SECONDS
+        then
+            return item
+        end
+        recent_target_attribution[bucket] = nil
+    end
+
+    -- Large bosses can report adjacent hit locations for the same multi-hit
+    -- skill. Reuse only a fresh, spatially close plain-value entry.
+    local best_item = nil
+    local best_distance_sq = nil
+    local max_distance_sq =
+        TARGET_ATTRIBUTION_CACHE_MAX_DISTANCE
+        * TARGET_ATTRIBUTION_CACHE_MAX_DISTANCE
+
+    for key, candidate in pairs(recent_target_attribution) do
+        local age = event.time - (candidate.time or -999.0)
+        if age < -SOURCE_AFTER_DAMAGE_SECONDS
+            or age > TARGET_ATTRIBUTION_CACHE_SECONDS
+        then
+            recent_target_attribution[key] = nil
+        elseif candidate.hit_x ~= nil
+            and candidate.hit_y ~= nil
+            and candidate.hit_z ~= nil
+        then
+            local dx = event.hit_x - candidate.hit_x
+            local dy = event.hit_y - candidate.hit_y
+            local dz = event.hit_z - candidate.hit_z
+            local distance_sq = dx * dx + dy * dy + dz * dz
+            if distance_sq <= max_distance_sq
+                and (
+                    best_distance_sq == nil
+                    or distance_sq < best_distance_sq
+                )
+            then
+                best_item = candidate
+                best_distance_sq = distance_sq
+            end
+        end
+    end
+
+    return best_item
+end
+
+local function remember_target_attribution(
+    event,
+    target_key,
+    owner,
+    method,
+    distance
+)
+    if event == nil
+        or owner == nil
+        or owner == "Unknown"
+        or not is_resolved_target_key(target_key)
+    then
+        return
+    end
+
+    local bucket = target_attribution_bucket_key(
+        event.hit_x,
+        event.hit_y,
+        event.hit_z
+    )
+    if bucket == nil then return end
+
+    if recent_target_attribution[bucket] == nil then
+        local cache_count = 0
+        local oldest_key = nil
+        local oldest_time = math.huge
+        for key, item in pairs(recent_target_attribution) do
+            cache_count = cache_count + 1
+            local item_time = item.time or -999.0
+            if item_time < oldest_time then
+                oldest_time = item_time
+                oldest_key = key
+            end
+        end
+        if cache_count >= SAFETY.recent_target_cache_max_entries
+            and oldest_key ~= nil
+        then
+            recent_target_attribution[oldest_key] = nil
+        end
+    end
+
+    recent_target_attribution[bucket] = {
+        time = event.time,
+        target_key = target_key,
+        owner = owner,
+        method = method,
+        distance = distance,
+        hit_x = event.hit_x,
+        hit_y = event.hit_y,
+        hit_z = event.hit_z
+    }
+end
+
 local function consume_best_source(
     damage_time,
     target_key,
@@ -1096,13 +1320,11 @@ local function consume_best_source(
         local target_matches = true
         if require_exact_target then
             target_matches = (
-                target_key ~= nil
-                and target_key ~= "nil"
+                is_resolved_target_key(target_key)
                 and item.target_key == target_key
             )
-        elseif item.target_key ~= nil
-            and target_key ~= nil
-            and target_key ~= "nil"
+        elseif is_resolved_target_key(item.target_key)
+            and is_resolved_target_key(target_key)
             and item.target_key ~= target_key
         then
             target_matches = false
@@ -1118,15 +1340,20 @@ local function consume_best_source(
             local first_delta = damage_time - item.time
 
             local is_tarte = item.character_name == "Tarte"
-            local initial_window = is_tarte
-                and TARTE_SOURCE_MATCH_WINDOW_SECONDS
-                or SOURCE_MATCH_WINDOW_SECONDS
-            local burst_window = is_tarte
-                and TARTE_SOURCE_BURST_REUSE_SECONDS
-                or SOURCE_BURST_REUSE_SECONDS
-            local burst_max_hits = is_tarte
-                and TARTE_SOURCE_BURST_MAX_HITS
-                or SOURCE_BURST_MAX_HITS
+            local is_chako = item.character_name == DANA_GOLEM_DISPLAY
+            local initial_window = SOURCE_MATCH_WINDOW_SECONDS
+            local burst_window = SOURCE_BURST_REUSE_SECONDS
+            local burst_max_hits = SOURCE_BURST_MAX_HITS
+
+            if is_tarte then
+                initial_window = TARTE_SOURCE_MATCH_WINDOW_SECONDS
+                burst_window = TARTE_SOURCE_BURST_REUSE_SECONDS
+                burst_max_hits = TARTE_SOURCE_BURST_MAX_HITS
+            elseif is_chako then
+                initial_window = CHAKO_SOURCE_MATCH_WINDOW_SECONDS
+                burst_window = CHAKO_SOURCE_BURST_REUSE_SECONDS
+                burst_max_hits = CHAKO_SOURCE_BURST_MAX_HITS
+            end
 
             local valid_initial = (
                 first_delta >= 0
@@ -1169,6 +1396,129 @@ local function consume_best_source(
     end
 
     return nil, nil
+end
+
+-- Strict temporal fallback used only when the target cannot be recovered.
+-- It rejects ambiguous records from different owners instead of guessing.
+local function consume_strict_unresolved_source(
+    damage_time,
+    preferred_character
+)
+    local best_item = nil
+    local best_distance = nil
+    local best_delta = nil
+    local ambiguous = false
+
+    for _, item in pairs(source_records) do
+        if item.character_name ~= nil
+            and item.character_name ~= "Unknown"
+            and (
+                preferred_character == nil
+                or item.character_name == preferred_character
+            )
+        then
+            local window = item.character_name == DANA_GOLEM_DISPLAY
+                and STRICT_CHAKO_MATCH_SECONDS
+                or STRICT_SOURCE_MATCH_SECONDS
+            local first_delta = damage_time - (item.time or -999.0)
+            local last_delta = item.last_match_time ~= nil
+                and (damage_time - item.last_match_time)
+                or nil
+
+            local valid_initial = (
+                first_delta >= 0
+                and first_delta <= window
+            ) or (
+                first_delta < 0
+                and (-first_delta) <= SOURCE_AFTER_DAMAGE_SECONDS
+            )
+            local valid_burst = (
+                last_delta ~= nil
+                and last_delta >= 0
+                and last_delta <= window
+            )
+
+            if valid_initial or valid_burst then
+                local distance = math.abs(
+                    valid_burst and last_delta or first_delta
+                )
+
+                if best_distance == nil
+                    or distance < best_distance
+                then
+                    best_item = item
+                    best_distance = distance
+                    best_delta = first_delta
+                    ambiguous = false
+                elseif best_item ~= nil
+                    and item.character_name ~= best_item.character_name
+                    and math.abs(distance - best_distance)
+                        <= STRICT_SOURCE_AMBIGUITY_SECONDS
+                then
+                    ambiguous = true
+                end
+            end
+        end
+    end
+
+    if best_item == nil or ambiguous then
+        return nil, nil
+    end
+
+    best_item.last_match_time = damage_time
+    best_item.match_count = (best_item.match_count or 0) + 1
+    return best_item, best_delta
+end
+
+local function batch_requires_snapshot(batch)
+    for _, event in ipairs(batch) do
+        if event.active_name == nil
+            or event.active_name == "Unknown"
+        then
+            return true
+        end
+
+        local source_delta = event.time - latest_source_time
+        if source_delta >= -SOURCE_AFTER_DAMAGE_SECONDS
+            and source_delta <= SOURCE_MATCH_WINDOW_SECONDS
+        then
+            return true
+        end
+
+        local chako_delta = event.time - latest_chako_source_time
+        if chako_delta >= -SOURCE_AFTER_DAMAGE_SECONDS
+            and chako_delta <= CHAKO_SOURCE_MATCH_WINDOW_SECONDS
+        then
+            return true
+        end
+
+        -- Dana can command Chako to perform attacks whose individual ticks do
+        -- not emit OnAttackBeginOverlap. While a confirmed Chako summon is
+        -- present, periodically resolve the enemy's LastAttacker instead of
+        -- assigning those ticks to Dana through the fast active-pawn path.
+        if event.active_name == "Dana"
+            and (event.time - last_chako_presence_time)
+                <= CHAKO_PRESENCE_SECONDS
+        then
+            local cached = get_recent_target_attribution(event)
+            if cached == nil
+                or (event.time - (cached.time or -999.0))
+                    >= CHAKO_DANA_TARGET_REFRESH_SECONDS
+            then
+                return true
+            end
+        end
+
+        if (event.time - swap_time) <= SWAP_RESOLUTION_SECONDS then
+            return true
+        end
+
+        if (event.time - last_target_probe_time) >= TARGET_PROBE_SECONDS then
+            return true
+        end
+    end
+
+    return false
 end
 
 local function elapsed_at(t)
@@ -1337,10 +1687,12 @@ local function battle_json(reason, t)
     return table.concat(parts)
 end
 
-local function export_battle(reason)
+local function export_battle(reason, append_history)
     if (not session_started and not session_finished) or total_damage() <= 0 then
         return false
     end
+
+    append_history = append_history ~= false
 
     local t = now()
     local json = battle_json(reason, t)
@@ -1349,7 +1701,10 @@ local function export_battle(reason)
         EXPORT_JSON_FILE .. ".tmp",
         json .. "\n"
     )
-    local history_saved = append_text(HISTORY_FILE, json .. "\n")
+    local history_saved = true
+    if append_history then
+        history_saved = append_text(HISTORY_FILE, json .. "\n")
+    end
 
     local elapsed = elapsed_at(t)
     local total = total_damage()
@@ -1382,14 +1737,27 @@ local function export_battle(reason)
         table.concat(csv_lines)
     )
 
+    local export_ok = latest_json_saved and latest_csv_saved
+    if append_history then
+        export_ok = export_ok and history_saved
+    end
+
+    local event_name
+    if append_history then
+        event_name = export_ok and "BATTLE_EXPORTED" or "BATTLE_EXPORT_FAILED"
+    else
+        event_name = export_ok and "BATTLE_CHECKPOINTED" or "BATTLE_CHECKPOINT_FAILED"
+    end
+
     append_line(
-        history_saved and "BATTLE_EXPORTED" or "BATTLE_EXPORT_FAILED",
+        event_name,
         "reason=" .. tostring(reason)
+            .. " append_history=" .. tostring(append_history)
             .. " history_saved=" .. tostring(history_saved)
             .. " latest_json=" .. tostring(latest_json_saved)
             .. " latest_csv=" .. tostring(latest_csv_saved)
     )
-    return history_saved
+    return export_ok
 end
 
 flush_timeline_events = function(force)
@@ -1424,16 +1792,38 @@ local function append_timeline_event(t, owner, damage, critical)
         combat_events_truncated = true
     end
 
-    timeline_pending_lines[#timeline_pending_lines + 1] = string.format(
-        "%.3f,%s,%.1f,%s\n",
-        relative_time,
-        csv_escape(owner),
-        damage,
-        critical and "1" or "0"
-    )
+    if #timeline_pending_lines < SAFETY.timeline_pending_hard_limit then
+        timeline_pending_lines[#timeline_pending_lines + 1] = string.format(
+            "%.3f,%s,%.1f,%s\n",
+            relative_time,
+            csv_escape(owner),
+            damage,
+            critical and "1" or "0"
+        )
+    else
+        SAFETY.timeline_lines_dropped = SAFETY.timeline_lines_dropped + 1
+        if not SAFETY.timeline_pressure_logged then
+            SAFETY.timeline_pressure_logged = true
+            append_line(
+                "TIMELINE_QUEUE_PRESSURE",
+                string.format(
+                    "limit=%d; damage totals continue; timeline rows may be omitted until disk writes recover",
+                    SAFETY.timeline_pending_hard_limit
+                )
+            )
+        end
+    end
 end
 
-local function clear_values()
+local function clear_values(token)
+    if token ~= SAFETY.reset_token then
+        append_line(
+            "RESET_GUARD_BLOCKED",
+            "unauthorized clear_values call; encounter preserved"
+        )
+        return false
+    end
+
     combat_generation = combat_generation + 1
     source_records = {}
     source_record_count = 0
@@ -1443,13 +1833,21 @@ local function clear_values()
     combat_events_truncated = false
     timeline_pending_lines = {}
     timeline_last_flush = now()
+    SAFETY.timeline_lines_dropped = 0
+    SAFETY.timeline_pressure_logged = false
     attribution_diagnostic_count = 0
     source_diagnostic_count = 0
     allied_target_diagnostic_count = 0
     owner_resolution_cache = {}
     special_summon_logged = {}
     special_target_owner_cache = {}
+    recent_target_attribution = {}
+    chako_source_link_log_count = 0
+    SAFETY.stale_world_scan_logged = false
     last_source_prune = -999.0
+    latest_source_time = -999.0
+    latest_chako_source_time = -999.0
+    last_target_probe_time = -999.0
 
     for _, name in ipairs(character_order) do
         totals[name] = 0.0
@@ -1463,11 +1861,15 @@ local function clear_values()
     session_start_time = 0.0
     session_end_time = 0.0
     last_outgoing_damage_time = -999.0
-    session_auto_saved = false
     current_enemy_name = "Unknown"
     current_enemy_time = -999.0
     last_enemy_object_key = nil
+    SAFETY.enemy_candidate_key = nil
+    SAFETY.enemy_candidate_name = nil
+    SAFETY.enemy_candidate_hits = 0
+    SAFETY.enemy_candidate_time = -999.0
     state_dirty = true
+    return true
 end
 
 local function reset_meter(reason)
@@ -1475,13 +1877,8 @@ local function reset_meter(reason)
     local has_damage = total_damage() > 0
     local archived = not has_damage
 
-    if has_damage and session_auto_saved then
-        -- The encounter is already present in battle_history.jsonl. Do not add
-        -- a duplicate row when the user clears the meter afterward.
-        archived = true
-        append_line("RESET_ARCHIVE_ALREADY_SAVED", reset_reason)
-    elseif has_damage then
-        archived = export_battle("reset:" .. reset_reason)
+    if has_damage then
+        archived = export_battle("reset:" .. reset_reason, true)
     end
 
     -- Never destroy an unsaved encounter. A locked history file can be retried
@@ -1493,7 +1890,9 @@ local function reset_meter(reason)
         return false
     end
 
-    clear_values()
+    if not clear_values(SAFETY.reset_token) then
+        return false
+    end
     write_text_atomic(
         TIMELINE_FILE,
         TIMELINE_FILE .. ".tmp",
@@ -1509,64 +1908,26 @@ end
 
 local write_snapshot
 
-local function archive_finished_session(reason)
-    if total_damage() <= 0 then
-        session_auto_saved = true
-        return true
-    end
-
-    if session_auto_saved then
-        return true
-    end
-
-    local saved = write_snapshot(reason) == true
-    if saved then
-        session_auto_saved = true
-    end
-    return saved
-end
-
 local function ensure_session(t)
     if session_finished then
-        local previous_damage = total_damage()
-
-        -- Never clear an automatically ended raid phase until it has been
-        -- appended to battle_history.jsonl.
-        local archived = archive_finished_session(
-            "auto before new encounter"
-        )
-
-        if previous_damage > 0 and not archived then
-            -- Preserve all totals if the history file is temporarily locked.
-            -- The new damage extends the current encounter and the save is
-            -- retried at the next idle boundary or manual RESET.
-            session_started = true
-            session_finished = false
-            session_end_time = 0.0
-            append_line(
-                "AUTO_RESET_ABORTED_SAVE_FAILED",
-                "continuing previous encounter without clearing totals"
-            )
-            state_dirty = true
-            return
-        end
-
-        clear_values()
-        write_text_atomic(
-            TIMELINE_FILE,
-            TIMELINE_FILE .. ".tmp",
-            "Time,Character,Damage,Critical\n"
-        )
+        -- Idle detection is only a checkpoint boundary. It must never erase
+        -- accumulated damage. Summon animations, boss invulnerability phases,
+        -- movement, menus, and character swaps can all exceed ten seconds.
+        session_started = true
+        session_finished = false
+        session_end_time = 0.0
         append_line(
-            "AUTO_RESET_AFTER_SAVE",
-            "previous_damage=" .. tostring(previous_damage)
+            "SESSION_RESUMED",
+            "continuing cumulative encounter damage="
+                .. tostring(total_damage())
         )
+        state_dirty = true
+        return
     end
 
     if not session_started then
         session_started = true
         session_finished = false
-        session_auto_saved = false
         session_start_time = t
         session_end_time = 0.0
         append_line("SESSION_START", "first outgoing damage")
@@ -1591,19 +1952,24 @@ local function finish_session_if_idle(t)
     session_finished = true
     state_dirty = true
 
-    session_auto_saved = archive_finished_session(
-        "auto combat end"
+    -- Save only the rolling latest JSON/CSV checkpoint here. Do not append a
+    -- history row and do not clear totals when damage resumes. The complete
+    -- encounter is appended to history exactly once on manual RESET.
+    local checkpoint_saved = write_snapshot(
+        "auto idle checkpoint",
+        false
     )
 
     append_line(
-        session_auto_saved
-            and "SESSION_AUTO_SAVED"
-            or "SESSION_AUTO_SAVE_FAILED",
+        checkpoint_saved
+            and "SESSION_IDLE_CHECKPOINT_SAVED"
+            or "SESSION_IDLE_CHECKPOINT_FAILED",
         string.format(
-            "duration=%.3fs idle=%.3fs minimum=%.3fs",
+            "duration=%.3fs idle=%.3fs minimum=%.3fs cumulative_damage=%.1f",
             duration,
             t - last_outgoing_damage_time,
-            AUTO_SAVE_MIN_DURATION_SECONDS
+            AUTO_SAVE_MIN_DURATION_SECONDS,
+            total_damage()
         )
     )
 
@@ -1611,7 +1977,7 @@ local function finish_session_if_idle(t)
 end
 
 -- Snapshot records the current cumulative encounter without resetting totals.
-write_snapshot = function(reason)
+write_snapshot = function(reason, append_history)
     local t = now()
     local elapsed = elapsed_at(t)
     local total = total_damage()
@@ -1639,7 +2005,8 @@ write_snapshot = function(reason)
     end
 
     return export_battle(
-        "snapshot:" .. tostring(reason or "manual")
+        "snapshot:" .. tostring(reason or "manual"),
+        append_history
     )
 end
 
@@ -1661,7 +2028,15 @@ local function commit_damage_event(event, owner, method)
         return
     end
 
+    -- Start or resume an encounter only after the event has a committed
+    -- owner. Target-probe and friendly-summon artifacts must not create empty
+    -- sessions or trigger immediate auto-save/reset cycles.
+    ensure_session(event.time)
+
     owner = register_character(owner)
+    if owner == DANA_GOLEM_DISPLAY then
+        note_chako_presence(event.time)
+    end
     totals[owner] = totals[owner] + event.damage
     hits[owner] = hits[owner] + 1
     highest_hits[owner] = math.max(
@@ -1713,31 +2088,93 @@ local function finalize_damage_event(
 
     local owner = nil
     local method = nil
+    local target_resolved = is_resolved_target_key(target_key)
 
-    -- Chako overlap callbacks provide an exact source + target pair. This must
-    -- be checked before the batch-time LastAttacker because another character
-    -- can overwrite LastAttacker after the player swaps but before the shared
-    -- batch is resolved.
-    local chako_source, chako_delta = consume_best_source(
-        event.time,
-        target_key,
-        DANA_GOLEM_DISPLAY,
-        true
-    )
-
-    if chako_source ~= nil then
-        owner = DANA_GOLEM_DISPLAY
-        method = string.format(
-            "exact_chako_source_target delta=%.1fms via=%s class=%s obj=%s",
-            chako_delta * 1000.0,
-            chako_source.owner_method or "unknown",
-            chako_source.class_name or "nil",
-            chako_source.object_name or "nil"
+    -- A verified source + target pair is stronger than a batch-time
+    -- LastAttacker value for every character, not only Chako. This prevents a
+    -- newer attacker from stealing delayed projectile or skill damage.
+    if target_resolved then
+        local exact_source, exact_delta = consume_best_source(
+            event.time,
+            target_key,
+            nil,
+            true
         )
-    elseif target_owner ~= nil and target_owner ~= "Unknown" then
+
+        if exact_source ~= nil then
+            owner = exact_source.character_name
+            method = string.format(
+                "exact_source_target delta=%.1fms via=%s class=%s obj=%s",
+                exact_delta * 1000.0,
+                exact_source.owner_method or "unknown",
+                exact_source.class_name or "nil",
+                exact_source.object_name or "nil"
+            )
+        end
+    end
+
+    -- If target recovery failed or LastAttacker was overwritten immediately
+    -- after a swap, accept only an unambiguous, very recent Chako source.
+    if owner == nil then
+        local allow_chako_override = (
+            target_owner == nil
+            or target_owner == "Unknown"
+            or (
+                event.active_name ~= "Dana"
+                and target_owner == event.active_name
+                and (event.time - swap_time)
+                    <= SWAP_RESOLUTION_SECONDS
+            )
+        )
+
+        if allow_chako_override then
+            local chako_source, chako_delta =
+                consume_strict_unresolved_source(
+                    event.time,
+                    DANA_GOLEM_DISPLAY
+                )
+
+            if chako_source ~= nil then
+                owner = DANA_GOLEM_DISPLAY
+                method = string.format(
+                    "strict_chako_source delta=%.1fms via=%s class=%s obj=%s",
+                    chako_delta * 1000.0,
+                    chako_source.owner_method or "unknown",
+                    chako_source.class_name or "nil",
+                    chako_source.object_name or "nil"
+                )
+            end
+        end
+    end
+
+    if owner == nil
+        and target_owner ~= nil
+        and target_owner ~= "Unknown"
+    then
         owner = target_owner
         method = target_method or "target_last_attacker"
-    else
+    end
+
+    -- Without a target, use only a narrow and ambiguity-checked temporal
+    -- source match. This catches SourceActor callbacks that arrive around the
+    -- damage text without turning an old projectile into a global owner.
+    if owner == nil and not target_resolved then
+        local strict_source, strict_delta =
+            consume_strict_unresolved_source(event.time, nil)
+
+        if strict_source ~= nil then
+            owner = strict_source.character_name
+            method = string.format(
+                "strict_unresolved_source delta=%.1fms via=%s class=%s obj=%s",
+                strict_delta * 1000.0,
+                strict_source.owner_method or "unknown",
+                strict_source.class_name or "nil",
+                strict_source.object_name or "nil"
+            )
+        end
+    end
+
+    if owner == nil and target_resolved then
         local source, delta = consume_best_source(
             event.time,
             target_key,
@@ -1748,40 +2185,42 @@ local function finalize_damage_event(
         if source ~= nil then
             owner = source.character_name
             method = string.format(
-                "explicit_source_fallback delta=%.1fms via=%s class=%s obj=%s",
+                "compatible_source_fallback delta=%.1fms via=%s class=%s obj=%s",
                 delta * 1000.0,
                 source.owner_method or "unknown",
                 source.class_name or "nil",
                 source.object_name or "nil"
             )
-        else
-            owner = event.active_name
-            method = "captured_active_pawn_fallback"
+        end
+    end
 
-            if attribution_diagnostic_count
-                < ATTRIBUTION_DIAGNOSTIC_LIMIT
-            then
-                attribution_diagnostic_count =
-                    attribution_diagnostic_count + 1
+    if owner == nil then
+        owner = event.active_name
+        method = "captured_active_pawn_fallback"
 
-                append_line(
-                    "ATTRIBUTION_ACTIVE_FALLBACK",
-                    string.format(
-                        "damage=%.1f critical=%s target=%s target_match=%s distance=%s captured_active=%d:%s last_attacker=%s chain=%s",
-                        event.damage,
-                        tostring(event.critical),
-                        target_key or "nil",
-                        tostring(target_match_method or "unknown"),
-                        target_distance ~= nil
-                            and string.format("%.1f", target_distance)
-                            or "nil",
-                        event.active_index,
-                        event.active_name,
-                        diagnostic_attacker or "not captured",
-                        diagnostic_chain or "not captured"
-                    )
+        if attribution_diagnostic_count
+            < ATTRIBUTION_DIAGNOSTIC_LIMIT
+        then
+            attribution_diagnostic_count =
+                attribution_diagnostic_count + 1
+
+            append_line(
+                "ATTRIBUTION_ACTIVE_FALLBACK",
+                string.format(
+                    "damage=%.1f critical=%s target=%s target_match=%s distance=%s captured_active=%d:%s last_attacker=%s chain=%s",
+                    event.damage,
+                    tostring(event.critical),
+                    target_key or "nil",
+                    tostring(target_match_method or "unknown"),
+                    target_distance ~= nil
+                        and string.format("%.1f", target_distance)
+                        or "nil",
+                    event.active_index,
+                    event.active_name,
+                    diagnostic_attacker or "not captured",
+                    diagnostic_chain or "not captured"
                 )
-            end
+            )
         end
     end
 
@@ -1861,32 +2300,59 @@ local function process_damage_batch_game_thread(token)
 
     prune_sources(now(), false)
 
-    -- One transient UObject snapshot is shared by the entire burst. The
-    -- snapshot and every actor reference remain local to this game-thread
-    -- callback and are released before it returns.
+    -- Most direct hits need no world scan: the active pawn captured in the
+    -- damage callback is already the correct owner. A transient monster
+    -- snapshot is created only for swap-sensitive, source-sensitive, unknown,
+    -- or periodic target-name probe batches.
     local snapshot = nil
-    local snapshot_reason = "monster_snapshot_failed"
-    local snapshot_ok, snapshot_value, reason_value = pcall(
-        build_monster_snapshot
-    )
+    local snapshot_reason = "fast_path_no_world_scan"
+    local needs_snapshot = batch_requires_snapshot(batch)
+    local newest_event_time = batch[#batch].time or now()
+    local batch_age = now() - newest_event_time
 
-    if snapshot_ok then
-        snapshot = snapshot_value
-        snapshot_reason = reason_value or "monster_snapshot_ready"
-    else
-        snapshot_reason = tostring(snapshot_value)
-        if hook_callback_error_count < 12 then
-            hook_callback_error_count =
-                hook_callback_error_count + 1
+    -- If the game thread was blocked by loading or teardown, do not call
+    -- FindAllOf on a stale batch. Plain-value source/active fallbacks are safer
+    -- than touching a world that may already be transitioning.
+    if needs_snapshot and batch_age > SAFETY.world_scan_max_event_age_seconds then
+        needs_snapshot = false
+        snapshot_reason = "stale_batch_no_world_scan"
+        if not SAFETY.stale_world_scan_logged then
+            SAFETY.stale_world_scan_logged = true
             append_line(
-                "MONSTER_SNAPSHOT_ERROR",
-                snapshot_reason
+                "STALE_WORLD_SCAN_SKIPPED",
+                string.format(
+                    "batch_age=%.0fms threshold=%.0fms",
+                    batch_age * 1000.0,
+                    SAFETY.world_scan_max_event_age_seconds * 1000.0
+                )
             )
         end
     end
 
+    if needs_snapshot then
+        last_target_probe_time = batch[#batch].time or now()
+
+        local snapshot_ok, snapshot_value, reason_value = pcall(
+            build_monster_snapshot
+        )
+
+        if snapshot_ok then
+            snapshot = snapshot_value
+            snapshot_reason = reason_value or "monster_snapshot_ready"
+        else
+            snapshot_reason = tostring(snapshot_value)
+            if hook_callback_error_count < 12 then
+                hook_callback_error_count =
+                    hook_callback_error_count + 1
+                append_line(
+                    "MONSTER_SNAPSHOT_ERROR",
+                    snapshot_reason
+                )
+            end
+        end
+    end
+
     local match_cache = {}
-    local resolution_cache = {}
 
     for _, event in ipairs(batch) do
         local target_owner = nil
@@ -1896,9 +2362,30 @@ local function process_damage_batch_game_thread(token)
         local target_match_method = snapshot_reason
         local diagnostic_attacker = "not captured"
         local diagnostic_chain = "not captured"
-        local ignore_allied_target = false
 
         local resolution_ok, resolution_error = pcall(function()
+            if snapshot == nil then
+                if event.active_name == "Dana"
+                    and (event.time - last_chako_presence_time)
+                        <= CHAKO_PRESENCE_SECONDS
+                then
+                    local cached = get_recent_target_attribution(event)
+                    if cached ~= nil then
+                        target_owner = cached.owner
+                        target_method = string.format(
+                            "cached_target_attribution age=%.0fms via=%s",
+                            (event.time - cached.time) * 1000.0,
+                            cached.method or "unknown"
+                        )
+                        target_key = cached.target_key
+                        target_distance = cached.distance
+                        target_match_method =
+                            "cached_hit_target_no_world_scan"
+                    end
+                end
+                return
+            end
+
             local target_entry
             target_entry, target_distance, target_match_method =
                 find_target_in_snapshot(
@@ -1919,105 +2406,79 @@ local function process_damage_batch_game_thread(token)
 
             target_key = target_entry.key
 
-            if target_entry.allied then
-                ignore_allied_target = true
-                if allied_target_diagnostic_count < 4 then
-                    allied_target_diagnostic_count =
-                        allied_target_diagnostic_count + 1
-                    append_line(
-                        "DAMAGE_IGNORED_ALLIED_TARGET",
-                        string.format(
-                            "damage=%.1f target=%s active=%d:%s",
-                            event.damage,
-                            target_key or "nil",
-                            event.active_index,
-                            event.active_name
-                        )
-                    )
-                end
-                return
-            end
-
-            local resolution = resolution_cache[target_key]
-            if resolution == nil then
-                local owner, method = resolve_target_last_attacker(
+            -- Read LastAttacker for each unresolved event instead of reusing
+            -- one target result for an entire burst. Exact source attribution
+            -- still runs first in finalize_damage_event().
+            target_owner, target_method =
+                resolve_target_last_attacker(
                     target_entry.actor,
-                    "game_thread_batch"
+                    "game_thread_event"
                 )
 
-                resolution = {
-                    owner = owner,
-                    method = method,
-                    diagnostic_attacker = "not captured",
-                    diagnostic_chain = "not captured"
-                }
-
-                if owner == nil
-                    and attribution_diagnostic_count
-                        < ATTRIBUTION_DIAGNOSTIC_LIMIT
-                then
-                    local attacker = get_property(
-                        target_entry.actor,
-                        "LastAttacker"
-                    )
-                    resolution.diagnostic_attacker =
-                        describe_object(attacker)
-                    resolution.diagnostic_chain =
-                        describe_owner_chain(attacker)
-                end
-
-                resolution_cache[target_key] = resolution
-            end
-
-            target_owner = resolution.owner
-            target_method = resolution.method
-            diagnostic_attacker =
-                resolution.diagnostic_attacker
-            diagnostic_chain =
-                resolution.diagnostic_chain
-        end)
-
-        if not resolution_ok then
-            if hook_callback_error_count < 12 then
-                hook_callback_error_count =
-                    hook_callback_error_count + 1
-                append_line(
-                    "DAMAGE_RESOLUTION_ERROR",
-                    tostring(resolution_error)
-                )
-            end
-        end
-
-        if not ignore_allied_target then
-            local commit_ok, commit_error = pcall(function()
-                finalize_damage_event(
+            if target_owner ~= nil
+                and target_owner ~= "Unknown"
+            then
+                remember_target_attribution(
                     event,
+                    target_key,
                     target_owner,
                     target_method,
-                    target_key,
-                    target_match_method,
-                    target_distance,
-                    diagnostic_attacker,
-                    diagnostic_chain
-                )
-            end)
-
-            if not commit_ok and hook_callback_error_count < 12 then
-                hook_callback_error_count =
-                    hook_callback_error_count + 1
-                append_line(
-                    "DAMAGE_COMMIT_ERROR",
-                    tostring(commit_error)
+                    target_distance
                 )
             end
+
+            if target_owner == nil
+                and attribution_diagnostic_count
+                    < ATTRIBUTION_DIAGNOSTIC_LIMIT
+            then
+                local attacker = get_property(
+                    target_entry.actor,
+                    "LastAttacker"
+                )
+                diagnostic_attacker = describe_object(attacker)
+                diagnostic_chain = describe_owner_chain(attacker)
+            end
+        end)
+
+        if not resolution_ok
+            and hook_callback_error_count < 12
+        then
+            hook_callback_error_count =
+                hook_callback_error_count + 1
+            append_line(
+                "DAMAGE_RESOLUTION_ERROR",
+                tostring(resolution_error)
+            )
+        end
+
+        local commit_ok, commit_error = pcall(function()
+            finalize_damage_event(
+                event,
+                target_owner,
+                target_method,
+                target_key,
+                target_match_method,
+                target_distance,
+                diagnostic_attacker,
+                diagnostic_chain
+            )
+        end)
+
+        if not commit_ok
+            and hook_callback_error_count < 12
+        then
+            hook_callback_error_count =
+                hook_callback_error_count + 1
+            append_line(
+                "DAMAGE_COMMIT_ERROR",
+                tostring(commit_error)
+            )
         end
     end
 
-    -- Explicitly discard every transient UObject container before scheduling
-    -- another batch.
+    -- No UObject escapes this game-thread callback.
     snapshot = nil
     match_cache = nil
-    resolution_cache = nil
     batch = nil
 
     if #pending_damage_events > 0 then
@@ -2207,7 +2668,6 @@ end
 
 reset_log_file()
 append_line("INIT", "script entered")
-register_character("Chako")
 write_state(true)
 
 install_hook(
@@ -2221,24 +2681,35 @@ install_hook(
         bFromSweep,
         SweepResult
     )
-        if transition_active then return end
-
-        local source = get_property(Context, "SourceActor")
-        if source == nil then
-            source = Context
+        local context_obj = read_param(Context, Context)
+        local source_actor = get_property(context_obj, "SourceActor")
+        if source_actor == nil then
+            source_actor = context_obj
         end
 
-        local class_name = object_class_name(source)
-        local obj_name = object_name(source)
+        local context_class = object_class_name(context_obj)
+        local context_name = object_name(context_obj)
+        local source_class = object_class_name(source_actor)
+        local source_name = object_name(source_actor)
 
+        -- Some Dana command skills are represented by a Chako-owned animation
+        -- context while SourceActor still points at Dana. Resolve the concrete
+        -- overlap context first, then the source actor.
         local owner, owner_method =
-            resolve_special_summon_owner(source, "source")
+            resolve_special_summon_owner(context_obj, "context")
+
+        if owner == nil and source_actor ~= context_obj then
+            owner, owner_method =
+                resolve_special_summon_owner(source_actor, "source")
+        end
 
         if owner == nil then
             local source_token_text = string.format(
-                "%s|%s",
-                class_name or "",
-                obj_name or ""
+                "%s|%s|%s|%s",
+                context_class or "",
+                context_name or "",
+                source_class or "",
+                source_name or ""
             )
             if source_token_text:find(
                 DANA_GOLEM_SOURCE_TOKEN,
@@ -2246,13 +2717,18 @@ install_hook(
                 true
             ) ~= nil then
                 owner = DANA_GOLEM_DISPLAY
-                owner_method = "exact_chako_source_token"
+                owner_method = "exact_chako_context_or_source_token"
+                note_chako_presence(now())
             end
         end
 
         if owner == nil then
             local token_owner, token_internal =
-                infer_from_roster_tokens(class_name)
+                infer_from_roster_tokens(context_class)
+            if token_owner == nil then
+                token_owner, token_internal =
+                    infer_from_roster_tokens(source_class)
+            end
             if token_owner ~= nil then
                 owner = token_owner
                 owner_method =
@@ -2261,8 +2737,14 @@ install_hook(
         end
 
         if owner == nil then
-            owner, owner_method = resolve_owner_chain(source)
+            owner, owner_method = resolve_owner_chain(context_obj)
         end
+        if owner == nil and source_actor ~= context_obj then
+            owner, owner_method = resolve_owner_chain(source_actor)
+        end
+
+        local class_name = context_class or source_class
+        local obj_name = context_name or source_name
 
         -- Only player roster members are accepted. Bosses and enemies never
         -- enter the source queue. Every retained record contains only plain Lua
@@ -2274,12 +2756,12 @@ install_hook(
                 source_diagnostic_count = source_diagnostic_count + 1
                 append_line("SOURCE_REJECTED", string.format(
                     "context=%s source=%s reason=%s active=%d:%s chain=%s",
-                    describe_object(Context),
-                    describe_object(source),
+                    describe_object(context_obj),
+                    describe_object(source_actor),
                     owner_method or "not linked to DsPC roster",
                     active_pc,
                     active_name,
-                    describe_owner_chain(source)
+                    describe_owner_chain(context_obj)
                 ))
             end
             return
@@ -2296,7 +2778,10 @@ install_hook(
             target_key = object_key(other_actor)
         end
 
-        local source_key = object_key(source)
+        -- Use the animation/projectile context as the record identity. This
+        -- prevents all of Dana's command projectiles from collapsing into the
+        -- same SourceActor key.
+        local source_key = object_key(context_obj)
         local _, inserted = remember_source(
             source_key,
             target_key,
@@ -2307,8 +2792,36 @@ install_hook(
             t
         )
 
+        if owner == DANA_GOLEM_DISPLAY
+            and chako_source_link_log_count < 8
+        then
+            chako_source_link_log_count =
+                chako_source_link_log_count + 1
+            append_line("CHAKO_SOURCE_LINK", string.format(
+                "context=%s source=%s target=%s via=%s",
+                describe_object(context_obj),
+                describe_object(source_actor),
+                target_key or "unresolved",
+                owner_method or "unknown"
+            ))
+        end
+
+        -- Seed a plain-string target lease directly from the exact overlap.
+        -- This lets a later nil/overwritten LastAttacker still resolve Chako
+        -- after Dana is swapped out, without retaining OtherActor.
+        if owner == DANA_GOLEM_DISPLAY
+            and is_resolved_target_key(target_key)
+        then
+            special_target_owner_cache[target_key] = {
+                owner = DANA_GOLEM_DISPLAY,
+                time = t
+            }
+        end
+
         -- Do not retain any UObject from the overlap callback.
         other_actor = nil
+        source_actor = nil
+        context_obj = nil
 
         if VERBOSE_LOGGING then
             append_line("SOURCE_ACCEPTED", string.format(
@@ -2332,8 +2845,6 @@ install_hook(
 install_hook(
     "/Script/DS.DsPlayerController:ClientShowDamageText",
     function(Context, Damage, HitLocation, IsPlayer, bCritical)
-        if transition_active then return end
-
         local damage = tonumber(read_param(Damage, 0)) or 0
         local is_player = read_param(IsPlayer, false) == true
         local critical = read_param(bCritical, false) == true
@@ -2350,8 +2861,6 @@ install_hook(
         local hit_x, hit_y, hit_z = vector_xyz(hit_location)
         local t = now()
 
-        ensure_session(t)
-
         local event = {
             generation = combat_generation,
             time = t,
@@ -2362,7 +2871,7 @@ install_hook(
             hit_x = hit_x,
             hit_y = hit_y,
             hit_z = hit_z,
-            target_key = "unresolved"
+            target_key = nil
         }
 
         if VERBOSE_DAMAGE_LOG then
@@ -2413,7 +2922,7 @@ else
 end
 
 append_line("INIT_DONE", string.format(
-    "hook_context_pawn=true no_persistent_uobject_cache=true coalesced_damage_batches=true one_world_scan_per_batch=true target_last_attacker=true separate_chako_row=true exact_chako_source_target=true bounded_owner_chain=true source_index=true deferred_timeline_io=true owner_cache_pruning=true state_write=%.1fs combat_end_idle=%.1fs auto_save_min=%.1fs source_keep=%.1fs deferred=%.0fms batch_max=%d",
+    "runtime_singleton_guard=true reset_guard=true stale_world_scan_guard=true hook_context_pawn=true no_persistent_uobject_cache=true coalesced_damage_batches=true one_world_scan_per_batch=true throttled_chako_skill_target_probe=true context_first_source_attribution=true enemy_only_target_snapshot=true target_last_attacker=true separate_chako_row=true exact_chako_source_target=true bounded_owner_chain=true source_index=true deferred_timeline_io=true owner_cache_pruning=true state_write=%.1fs idle_checkpoint=%.1fs auto_save_min=%.1fs source_keep=%.1fs deferred=%.0fms batch_max=%d",
     STATE_WRITE_SECONDS,
     COMBAT_END_IDLE_SECONDS,
     AUTO_SAVE_MIN_DURATION_SECONDS,
