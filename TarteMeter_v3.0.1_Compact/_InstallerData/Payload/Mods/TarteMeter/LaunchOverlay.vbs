@@ -30,17 +30,13 @@ If Not fso.FileExists(powershellPath) Then
 End If
 
 shell.CurrentDirectory = folder
-commandLine = Chr(34) & powershellPath & Chr(34) & _
-    " -NoLogo -NoProfile -ExecutionPolicy Bypass -STA" & _
-    " -WindowStyle Hidden -File " & Chr(34) & bootstrapPath & Chr(34)
+commandLine = Chr(34) & powershellPath & Chr(34) & " -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File " & Chr(34) & bootstrapPath & Chr(34)
 
 Err.Clear
 result = shell.Run(commandLine, 0, False)
 
 If Err.Number <> 0 Or result <> 0 Then
-    message = "Windows could not start TarteMeter." & vbCrLf & _
-              "Error " & Err.Number & ": " & Err.Description & vbCrLf & _
-              "Command: " & commandLine
+    message = "Windows could not start TarteMeter." & vbCrLf & "Error " & Err.Number & ": " & Err.Description & vbCrLf & "Command: " & commandLine
     Set stream = fso.CreateTextFile(errorPath, True, False)
     stream.WriteLine message
     stream.Close

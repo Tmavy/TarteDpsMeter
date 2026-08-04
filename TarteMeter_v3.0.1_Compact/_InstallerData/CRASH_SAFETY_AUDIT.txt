@@ -1,0 +1,31 @@
+TARTEMETER v3.0.1 - STRUCTURE, HOOK AND INSTALLER SAFETY AUDIT
+
+SUMMARY
+-------
+This release is an installer/launcher hotfix over the validated v3.0.0 Compact runtime.
+The combat core is unchanged except for the displayed version string.
+
+ROOT CAUSE FIXED
+----------------
+v3.0.0 packaged VBScript files with CRCRLF line endings. A blank logical line followed every continuation token, producing Windows Script Host error 800A03EA. v3.0.1 rewrites both VBS files with conservative single-line expressions, ASCII encoding, no BOM, no continuation tokens, and canonical CRLF endings.
+
+HOOKS
+-----
+1. /Script/DS.DsAnimationProjectile:OnAttackBeginOverlap
+2. /Script/DS.DsPlayerController:ClientShowDamageText
+No additional hooks were added.
+
+RUNTIME SAFETY
+--------------
+- Process-wide singleton guard retained.
+- Protected hook installation retained.
+- Bounded damage/source/target/Timeline queues retained.
+- No persistent UObject cache retained.
+- Chako source/target attribution retained.
+- Manual reset guard and no-auto-reset policy retained.
+- Transactional F6 save retained.
+- Exact game PID shutdown retained.
+
+VALIDATION LIMIT
+----------------
+Static checks cannot replace a live cscript.exe/WPF/game test.

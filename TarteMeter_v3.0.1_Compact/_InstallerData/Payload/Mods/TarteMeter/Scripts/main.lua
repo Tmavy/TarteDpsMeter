@@ -1,4 +1,4 @@
-local MOD_NAME = "TarteMeter v2.7.4"
+local MOD_NAME = "TarteMeter v3.0.1"
 -- UE4SS can discover the same mod through more than one enable mechanism.
 -- A process-wide guard prevents duplicate combat hooks in one game process.
 if _G ~= nil and _G["__TARTE_METER_RUNTIME_ACTIVE"] ~= nil then
@@ -25,6 +25,11 @@ local EXPORT_CSV_FILE = "Mods/TarteMeter/latest_battle.csv"
 local EXPORT_JSON_FILE = "Mods/TarteMeter/latest_battle.json"
 
 local SAFETY = {
+    history_index_file = "Mods/TarteMeter/battle_history_index.tsv",
+    timeline_archive_dir = "Mods/TarteMeter/battle_timelines",
+    timeline_archive_dir_native = "Mods\\TarteMeter\\battle_timelines",
+    json_event_sample_limit = 500,
+    chako_background_target_refresh_seconds = 0.500,
     world_scan_max_event_age_seconds = 1.000,
     monster_snapshot_max_actors = 1024,
     timeline_pending_hard_limit = 4096,
@@ -39,6 +44,9 @@ local SAFETY = {
     timeline_lines_dropped = 0,
     timeline_pressure_logged = false,
     stale_world_scan_logged = false,
+    enemy_actor_change_log_count = 0,
+    enemy_actor_change_log_time = -999.0,
+    enemy_actor_change_signature = nil,
     reset_token = {}
 }
 
@@ -74,7 +82,7 @@ local TARTE_SOURCE_BURST_MAX_HITS = 24
 -- Performance controls.
 local ACTIVE_POLL_SECONDS = 0.250
 local STATE_WRITE_SECONDS = 0.750
-local COMMAND_POLL_SECONDS = 0.500
+local COMMAND_POLL_SECONDS = 0.250
 local OWNER_CACHE_SECONDS = 2.000
 local OWNER_NEGATIVE_CACHE_SECONDS = 0.250
 local OWNER_CACHE_PRUNE_SECONDS = 1.000
@@ -102,7 +110,7 @@ local ALLIED_SUMMON_TARGET_TOKENS = {
     "DsMon_Kalien_Large_Fox_C",
     "DsMon_Kalien_SignalA_Fox_C"
 }
-local MAX_HISTORY_EVENTS = 25000
+local MAX_HISTORY_EVENTS = 2000
 local VERBOSE_DAMAGE_LOG = false
 
 -- After this idle time, write a rolling latest checkpoint only.
@@ -117,6 +125,8 @@ local current_enemy_name = "Unknown"
 local current_enemy_time = -999.0
 local ENEMY_NAME_KEEP_SECONDS = 3.0
 local last_enemy_object_key = nil
+local reset_in_progress = false
+local export_sequence = 0
 
 local source_records = {}
 local source_record_count = 0
@@ -686,15 +696,25 @@ local function set_current_enemy(monster)
 
     if name == current_enemy_name then
         if key ~= last_enemy_object_key then
-            append_line(
-                "ENEMY_ACTOR_ID_CHANGED",
-                string.format(
-                    "name=%s old=%s new=%s encounter_continues=true",
-                    current_enemy_name,
-                    tostring(last_enemy_object_key),
-                    tostring(key)
+            SAFETY.enemy_actor_change_log_count =
+                SAFETY.enemy_actor_change_log_count + 1
+            if SAFETY.enemy_actor_change_log_count <= 6 then
+                append_line(
+                    "ENEMY_ACTOR_ID_CHANGED",
+                    string.format(
+                        "name=%s old=%s new=%s encounter_continues=true",
+                        current_enemy_name,
+                        tostring(last_enemy_object_key),
+                        tostring(key)
+                    )
                 )
-            )
+            elseif SAFETY.enemy_actor_change_log_count == 7 then
+                append_line(
+                    "ENEMY_ACTOR_ID_FLAPPING_SUPPRESSED",
+                    "name=" .. tostring(current_enemy_name)
+                        .. " further same-name actor swaps are quiet"
+                )
+            end
         end
         last_enemy_object_key = key
         current_enemy_time = t
@@ -1492,18 +1512,19 @@ local function batch_requires_snapshot(batch)
             return true
         end
 
-        -- Dana can command Chako to perform attacks whose individual ticks do
-        -- not emit OnAttackBeginOverlap. While a confirmed Chako summon is
-        -- present, periodically resolve the enemy's LastAttacker instead of
-        -- assigning those ticks to Dana through the fast active-pawn path.
-        if event.active_name == "Dana"
-            and (event.time - last_chako_presence_time)
+        -- Chako can keep attacking after Dana is swapped out. While the summon
+        -- lease is active, resolve LastAttacker at a bounded rate instead of
+        -- letting source-less ticks fall through to the newly active character.
+        if (event.time - last_chako_presence_time)
                 <= CHAKO_PRESENCE_SECONDS
         then
             local cached = get_recent_target_attribution(event)
+            local refresh_seconds = event.active_name == "Dana"
+                and CHAKO_DANA_TARGET_REFRESH_SECONDS
+                or SAFETY.chako_background_target_refresh_seconds
             if cached == nil
                 or (event.time - (cached.time or -999.0))
-                    >= CHAKO_DANA_TARGET_REFRESH_SECONDS
+                    >= refresh_seconds
             then
                 return true
             end
@@ -1573,8 +1594,9 @@ local function write_state(force)
     local elapsed = elapsed_at(t)
     local total = total_damage()
     local overall_dps = elapsed > 0 and total / elapsed or 0.0
-    local status = session_started and "COMBAT"
-        or (session_finished and "ENDED" or "READY")
+    local status = reset_in_progress and "SAVING"
+        or (session_started and "COMBAT"
+        or (session_finished and "ENDED" or "READY"))
 
     local lines = {
         "version=4\n",
@@ -1626,17 +1648,154 @@ local function csv_escape(value)
     return s
 end
 
-local function battle_json(reason, t)
+local IO_HELPERS = {}
+
+function IO_HELPERS.file_exists(path)
+    local f = io.open(path, "rb")
+    if f == nil then return false end
+    f:close()
+    return true
+end
+
+function IO_HELPERS.file_size(path)
+    local f = io.open(path, "rb")
+    if f == nil then return 0 end
+    local size = f:seek("end") or 0
+    f:close()
+    return size
+end
+
+function IO_HELPERS.ensure_timeline_archive_directory()
+    pcall(function()
+        os.execute(
+            'if not exist "' .. SAFETY.timeline_archive_dir_native
+                .. '" mkdir "' .. SAFETY.timeline_archive_dir_native
+                .. '" >nul 2>nul'
+        )
+    end)
+end
+
+function IO_HELPERS.ensure_current_timeline_file()
+    if IO_HELPERS.file_size(TIMELINE_FILE) > 0 then return true end
+    return write_text_atomic(
+        TIMELINE_FILE,
+        TIMELINE_FILE .. ".tmp",
+        "Time,Character,Damage,Critical\n"
+    )
+end
+
+function IO_HELPERS.append_text_with_position(path, text)
+    local start_offset = 0
+    local byte_length = #text
+    local ok = pcall(function()
+        local f = assert(io.open(path, "ab"))
+        start_offset = f:seek("end") or 0
+        assert(f:write(text))
+        assert(f:close())
+    end)
+    return ok, start_offset, byte_length
+end
+
+function IO_HELPERS.copy_file(source_path, destination_path)
+    local ok = pcall(function()
+        local source = assert(io.open(source_path, "rb"))
+        local destination = assert(io.open(destination_path, "wb"))
+        while true do
+            local chunk = source:read(1024 * 1024)
+            if chunk == nil then break end
+            assert(destination:write(chunk))
+        end
+        assert(source:close())
+        assert(destination:close())
+    end)
+    if not ok then
+        pcall(function() os.remove(destination_path) end)
+    end
+    return ok
+end
+
+function IO_HELPERS.move_file(source_path, destination_path)
+    -- Historical Timeline archives are immutable. Never remove an existing
+    -- destination; archive_current_timeline() chooses a unique path first.
+    if IO_HELPERS.file_exists(destination_path) then
+        return false, "destination_exists"
+    end
+    local renamed = os.rename(source_path, destination_path)
+    if renamed then return true, "rename" end
+
+    if not IO_HELPERS.copy_file(source_path, destination_path) then
+        return false, "copy_failed"
+    end
+    if not os.remove(source_path) then
+        pcall(function() os.remove(destination_path) end)
+        return false, "source_remove_failed"
+    end
+    return true, "copy"
+end
+
+function IO_HELPERS.restore_archived_timeline(archive_path)
+    pcall(function() os.remove(TIMELINE_FILE) end)
+    local restored = os.rename(archive_path, TIMELINE_FILE)
+    if restored then return true end
+    if IO_HELPERS.copy_file(archive_path, TIMELINE_FILE) then
+        pcall(function() os.remove(archive_path) end)
+        return true
+    end
+    return false
+end
+
+function IO_HELPERS.tsv_escape(value)
+    local s = tostring(value or "")
+    s = s:gsub("[\t\r\n]", " ")
+    return s
+end
+
+function IO_HELPERS.make_battle_id(t)
+    export_sequence = export_sequence + 1
+    local monotonic_ms = math.floor((tonumber(t) or 0.0) * 1000.0)
+        % 1000000000
+    local hit_count = 0
+    if IO_HELPERS.count_total_hits ~= nil then
+        hit_count = IO_HELPERS.count_total_hits() % 10000000
+    end
+    return string.format(
+        "%s_%09d_%07d_%03d",
+        os.date("!%Y%m%dT%H%M%SZ"),
+        monotonic_ms,
+        hit_count,
+        export_sequence % 1000
+    )
+end
+
+function IO_HELPERS.count_total_hits()
+    local total_hits = 0
+    for _, name in ipairs(character_order) do
+        total_hits = total_hits + (hits[name] or 0)
+    end
+    return total_hits
+end
+
+function IO_HELPERS.battle_json(reason, t, battle_id, timeline_file)
     local elapsed = elapsed_at(t)
     local total = total_damage()
+    local timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    local event_count = IO_HELPERS.count_total_hits()
     local parts = {
         "{",
-        '"timestamp":"' .. json_escape(os.date("!%Y-%m-%dT%H:%M:%SZ")) .. '",',
+        '"schema_version":2,',
+        '"battle_id":"' .. json_escape(battle_id or "") .. '",',
+        '"timestamp":"' .. json_escape(timestamp) .. '",',
         '"reason":"' .. json_escape(reason or "manual") .. '",',
         '"target":"' .. json_escape(current_enemy_name or "Unknown") .. '",',
         string.format('"duration":%.3f,', elapsed),
         string.format('"total_damage":%.1f,', total),
         string.format('"dps":%.1f,', elapsed > 0 and total / elapsed or 0.0),
+        '"timeline_file":"' .. json_escape(timeline_file or "") .. '",',
+        string.format('"event_count":%d,', event_count),
+        string.format(
+            '"timeline_lines_dropped":%d,',
+            SAFETY.timeline_lines_dropped or 0
+        ),
         '"events_truncated":' .. (combat_events_truncated and "true" or "false") .. ',',
         '"characters":['
     }
@@ -1658,12 +1817,32 @@ local function battle_json(reason, t)
     end
     table.insert(parts, '],"events":[')
 
+    -- The full timeline is already written incrementally to CSV. Embed only a
+    -- bounded preview in JSON so F6 save cost no longer grows with long fights.
+    local stored_count = #combat_events
+    local sample_step = stored_count > SAFETY.json_event_sample_limit
+        and math.ceil(stored_count / SAFETY.json_event_sample_limit)
+        or 1
     local first_event = true
-    local event_chunk = {}
-    local event_chunk_size = 256
-
-    for _, event in ipairs(combat_events) do
-        event_chunk[#event_chunk + 1] = string.format(
+    local last_written_index = 0
+    for event_index = 1, stored_count, sample_step do
+        local event = combat_events[event_index]
+        if event ~= nil then
+            parts[#parts + 1] = string.format(
+                '%s{"time":%.3f,"character":"%s","damage":%.1f,"critical":%s}',
+                first_event and "" or ",",
+                event.time or 0.0,
+                json_escape(event.character or "Unknown"),
+                event.damage or 0.0,
+                event.critical and "true" or "false"
+            )
+            first_event = false
+            last_written_index = event_index
+        end
+    end
+    if stored_count > 0 and last_written_index ~= stored_count then
+        local event = combat_events[stored_count]
+        parts[#parts + 1] = string.format(
             '%s{"time":%.3f,"character":"%s","damage":%.1f,"critical":%s}',
             first_event and "" or ",",
             event.time or 0.0,
@@ -1671,41 +1850,13 @@ local function battle_json(reason, t)
             event.damage or 0.0,
             event.critical and "true" or "false"
         )
-        first_event = false
-
-        if #event_chunk >= event_chunk_size then
-            parts[#parts + 1] = table.concat(event_chunk)
-            event_chunk = {}
-        end
-    end
-
-    if #event_chunk > 0 then
-        parts[#parts + 1] = table.concat(event_chunk)
     end
 
     parts[#parts + 1] = "]}"
-    return table.concat(parts)
+    return table.concat(parts), timestamp, elapsed, total, event_count
 end
 
-local function export_battle(reason, append_history)
-    if (not session_started and not session_finished) or total_damage() <= 0 then
-        return false
-    end
-
-    append_history = append_history ~= false
-
-    local t = now()
-    local json = battle_json(reason, t)
-    local latest_json_saved = write_text_atomic(
-        EXPORT_JSON_FILE,
-        EXPORT_JSON_FILE .. ".tmp",
-        json .. "\n"
-    )
-    local history_saved = true
-    if append_history then
-        history_saved = append_text(HISTORY_FILE, json .. "\n")
-    end
-
+function IO_HELPERS.build_battle_csv(t)
     local elapsed = elapsed_at(t)
     local total = total_damage()
     local csv_lines = {
@@ -1730,16 +1881,141 @@ local function export_battle(reason, append_history)
             )
         end
     end
+    return table.concat(csv_lines)
+end
 
+function IO_HELPERS.archive_current_timeline(battle_id)
+    if not flush_timeline_events(true) then
+        return false, nil, nil, "timeline_flush_failed"
+    end
+    if not IO_HELPERS.ensure_current_timeline_file() then
+        return false, nil, nil, "timeline_prepare_failed"
+    end
+
+    IO_HELPERS.ensure_timeline_archive_directory()
+    local archive_name = battle_id .. ".csv"
+    local archive_path = SAFETY.timeline_archive_dir .. "/" .. archive_name
+    local suffix = 0
+    while IO_HELPERS.file_exists(archive_path) and suffix < 1000 do
+        suffix = suffix + 1
+        archive_name = string.format("%s_%03d.csv", battle_id, suffix)
+        archive_path = SAFETY.timeline_archive_dir .. "/" .. archive_name
+    end
+    if IO_HELPERS.file_exists(archive_path) then
+        return false, nil, nil, "unique_archive_name_exhausted"
+    end
+    local relative_path = "battle_timelines/" .. archive_name
+    local moved, method = IO_HELPERS.move_file(TIMELINE_FILE, archive_path)
+    if not moved then
+        return false, relative_path, archive_path, method
+    end
+    return true, relative_path, archive_path, method
+end
+
+local function export_battle(reason, append_history)
+    if (not session_started and not session_finished) or total_damage() <= 0 then
+        return false
+    end
+
+    append_history = append_history ~= false
+    local t = now()
+    local battle_id = append_history and IO_HELPERS.make_battle_id(t) or "current"
+    local timeline_relative = "current_timeline.csv"
+    local timeline_archive_path = nil
+    local timeline_archive_method = "current"
+
+    if append_history then
+        local archived, relative_path, archive_path, archive_method =
+            IO_HELPERS.archive_current_timeline(battle_id)
+        timeline_relative = relative_path or timeline_relative
+        timeline_archive_path = archive_path
+        timeline_archive_method = archive_method or "failed"
+        if not archived then
+            append_line(
+                "BATTLE_EXPORT_FAILED",
+                "reason=" .. tostring(reason)
+                    .. " timeline_archive=" .. tostring(timeline_archive_method)
+            )
+            return false
+        end
+    else
+        if not flush_timeline_events(true) then
+            append_line(
+                "BATTLE_CHECKPOINT_FAILED",
+                "reason=" .. tostring(reason) .. " timeline_flush_failed=true"
+            )
+            return false
+        end
+        if not IO_HELPERS.ensure_current_timeline_file() then
+            append_line(
+                "BATTLE_CHECKPOINT_FAILED",
+                "reason=" .. tostring(reason) .. " timeline_prepare_failed=true"
+            )
+            return false
+        end
+    end
+
+    local json, timestamp, elapsed, total, event_count = IO_HELPERS.battle_json(
+        reason,
+        t,
+        battle_id,
+        timeline_relative
+    )
+    local csv = IO_HELPERS.build_battle_csv(t)
+
+    local latest_json_saved = write_text_atomic(
+        EXPORT_JSON_FILE,
+        EXPORT_JSON_FILE .. ".tmp",
+        json .. "\n"
+    )
     local latest_csv_saved = write_text_atomic(
         EXPORT_CSV_FILE,
         EXPORT_CSV_FILE .. ".tmp",
-        table.concat(csv_lines)
+        csv
     )
+
+    local history_saved = true
+    local history_offset = 0
+    local history_bytes = 0
+    if append_history and latest_json_saved and latest_csv_saved then
+        history_saved, history_offset, history_bytes =
+            IO_HELPERS.append_text_with_position(HISTORY_FILE, json .. "\n")
+    elseif append_history then
+        history_saved = false
+    end
 
     local export_ok = latest_json_saved and latest_csv_saved
     if append_history then
         export_ok = export_ok and history_saved
+    end
+
+    local index_saved = true
+    if append_history and export_ok then
+        local index_line = table.concat({
+            "v1",
+            IO_HELPERS.tsv_escape(battle_id),
+            IO_HELPERS.tsv_escape(timestamp),
+            IO_HELPERS.tsv_escape(reason or "manual"),
+            IO_HELPERS.tsv_escape(current_enemy_name or "Unknown"),
+            string.format("%.3f", elapsed),
+            string.format("%.1f", total),
+            string.format("%.1f", elapsed > 0 and total / elapsed or 0.0),
+            IO_HELPERS.tsv_escape(timeline_relative),
+            tostring(history_offset),
+            tostring(history_bytes),
+            tostring(event_count),
+            combat_events_truncated and "1" or "0"
+        }, "\t") .. "\n"
+        index_saved = append_text(SAFETY.history_index_file, index_line)
+    end
+
+    if not export_ok and timeline_archive_path ~= nil then
+        local restored = IO_HELPERS.restore_archived_timeline(timeline_archive_path)
+        append_line(
+            restored and "TIMELINE_ARCHIVE_ROLLED_BACK"
+                or "TIMELINE_ARCHIVE_ROLLBACK_FAILED",
+            tostring(timeline_archive_path)
+        )
     end
 
     local event_name
@@ -1754,6 +2030,11 @@ local function export_battle(reason, append_history)
         "reason=" .. tostring(reason)
             .. " append_history=" .. tostring(append_history)
             .. " history_saved=" .. tostring(history_saved)
+            .. " index_saved=" .. tostring(index_saved)
+            .. " timeline=" .. tostring(timeline_relative)
+            .. " timeline_archive=" .. tostring(timeline_archive_method)
+            .. " events=" .. tostring(event_count)
+            .. " json_preview_limit=" .. tostring(SAFETY.json_event_sample_limit)
             .. " latest_json=" .. tostring(latest_json_saved)
             .. " latest_csv=" .. tostring(latest_csv_saved)
     )
@@ -1761,21 +2042,22 @@ local function export_battle(reason, append_history)
 end
 
 flush_timeline_events = function(force)
-    if #timeline_pending_lines == 0 then return end
+    if #timeline_pending_lines == 0 then return true end
 
     local t = now()
     if not force
         and #timeline_pending_lines < TIMELINE_FLUSH_MAX_LINES
         and (t - timeline_last_flush) < TIMELINE_FLUSH_SECONDS then
-        return
+        return true
     end
 
     if not append_text(TIMELINE_FILE, table.concat(timeline_pending_lines)) then
-        return
+        return false
     end
 
     timeline_pending_lines = {}
     timeline_last_flush = t
+    return true
 end
 
 local function append_timeline_event(t, owner, damage, critical)
@@ -1844,6 +2126,9 @@ local function clear_values(token)
     recent_target_attribution = {}
     chako_source_link_log_count = 0
     SAFETY.stale_world_scan_logged = false
+    SAFETY.enemy_actor_change_log_count = 0
+    SAFETY.enemy_actor_change_log_time = -999.0
+    SAFETY.enemy_actor_change_signature = nil
     last_source_prune = -999.0
     latest_source_time = -999.0
     latest_chako_source_time = -999.0
@@ -1873,17 +2158,29 @@ local function clear_values(token)
 end
 
 local function reset_meter(reason)
+    if reset_in_progress then
+        append_line("RESET_IGNORED_BUSY", tostring(reason or "manual"))
+        return false
+    end
+
     local reset_reason = tostring(reason or "manual")
     local has_damage = total_damage() > 0
     local archived = not has_damage
+
+    reset_in_progress = true
+    state_dirty = true
+    -- Publish SAVING immediately. Timeline flushing happens here, before the
+    -- archive file is detached from the active encounter.
+    write_state(true)
 
     if has_damage then
         archived = export_battle("reset:" .. reset_reason, true)
     end
 
-    -- Never destroy an unsaved encounter. A locked history file can be retried
-    -- by pressing RESET again after the lock is released.
+    -- Never destroy an unsaved encounter. A locked history or timeline file
+    -- can be retried by pressing RESET again after the lock is released.
     if has_damage and not archived then
+        reset_in_progress = false
         append_line("RESET_ABORTED_SAVE_FAILED", reset_reason)
         state_dirty = true
         write_state(true)
@@ -1891,8 +2188,10 @@ local function reset_meter(reason)
     end
 
     if not clear_values(SAFETY.reset_token) then
+        reset_in_progress = false
         return false
     end
+    reset_in_progress = false
     write_text_atomic(
         TIMELINE_FILE,
         TIMELINE_FILE .. ".tmp",
@@ -2365,8 +2664,7 @@ local function process_damage_batch_game_thread(token)
 
         local resolution_ok, resolution_error = pcall(function()
             if snapshot == nil then
-                if event.active_name == "Dana"
-                    and (event.time - last_chako_presence_time)
+                if (event.time - last_chako_presence_time)
                         <= CHAKO_PRESENCE_SECONDS
                 then
                     local cached = get_recent_target_attribution(event)
@@ -2667,6 +2965,8 @@ local function install_hook(path, callback)
 end
 
 reset_log_file()
+IO_HELPERS.ensure_timeline_archive_directory()
+IO_HELPERS.ensure_current_timeline_file()
 append_line("INIT", "script entered")
 write_state(true)
 
@@ -2849,6 +3149,10 @@ install_hook(
         local is_player = read_param(IsPlayer, false) == true
         local critical = read_param(bCritical, false) == true
 
+        -- Reset serialization is deliberately short and runs outside the game
+        -- thread. Ignore callbacks inside that tiny boundary so the archived
+        -- totals and detached timeline cannot diverge.
+        if reset_in_progress then return end
         if is_player then return end
         if damage <= 0 then return end
 
@@ -2922,7 +3226,7 @@ else
 end
 
 append_line("INIT_DONE", string.format(
-    "runtime_singleton_guard=true reset_guard=true stale_world_scan_guard=true hook_context_pawn=true no_persistent_uobject_cache=true coalesced_damage_batches=true one_world_scan_per_batch=true throttled_chako_skill_target_probe=true context_first_source_attribution=true enemy_only_target_snapshot=true target_last_attacker=true separate_chako_row=true exact_chako_source_target=true bounded_owner_chain=true source_index=true deferred_timeline_io=true owner_cache_pruning=true state_write=%.1fs idle_checkpoint=%.1fs auto_save_min=%.1fs source_keep=%.1fs deferred=%.0fms batch_max=%d",
+    "runtime_singleton_guard=true reset_guard=true compact_history_v2=true archived_timeline=true bounded_json_preview=true low_memory_event_preview=true persistent_column_layout=true chako_post_swap_probe=true stale_world_scan_guard=true hook_context_pawn=true no_persistent_uobject_cache=true coalesced_damage_batches=true one_world_scan_per_batch=true throttled_chako_skill_target_probe=true context_first_source_attribution=true enemy_only_target_snapshot=true target_last_attacker=true separate_chako_row=true exact_chako_source_target=true bounded_owner_chain=true source_index=true deferred_timeline_io=true owner_cache_pruning=true state_write=%.1fs idle_checkpoint=%.1fs auto_save_min=%.1fs source_keep=%.1fs deferred=%.0fms batch_max=%d",
     STATE_WRITE_SECONDS,
     COMBAT_END_IDLE_SECONDS,
     AUTO_SAVE_MIN_DURATION_SECONDS,

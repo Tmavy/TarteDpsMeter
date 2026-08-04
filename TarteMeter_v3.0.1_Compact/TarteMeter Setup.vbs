@@ -17,9 +17,7 @@ If fso.FileExists(logPath) Then
 End If
 
 If Not fso.FileExists(setupScript) Then
-    MsgBox "The setup files are incomplete." & vbCrLf & vbCrLf & _
-           "Extract the entire archive to a normal folder, then run TarteMeter Setup.vbs again.", _
-           vbCritical, "TarteMeter Setup"
+    MsgBox "The setup files are incomplete." & vbCrLf & vbCrLf & "Extract the entire archive to a normal folder, then run TarteMeter Setup.vbs again.", vbCritical, "TarteMeter Setup"
     WScript.Quit 2
 End If
 
@@ -28,30 +26,22 @@ If Not fso.FileExists(powershellPath) Then
 End If
 
 shell.CurrentDirectory = baseFolder
-
-commandLine = Chr(34) & powershellPath & Chr(34) & _
-              " -NoLogo -NoProfile -ExecutionPolicy Bypass -STA" & _
-              " -WindowStyle Hidden -File " & Chr(34) & setupScript & Chr(34)
+commandLine = Chr(34) & powershellPath & Chr(34) & " -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File " & Chr(34) & setupScript & Chr(34)
 
 Err.Clear
 exitCode = shell.Run(commandLine, 0, True)
 
 If Err.Number <> 0 Then
-    errorText = "Windows Script Host could not start the setup." & vbCrLf & _
-                "Error " & Err.Number & ": " & Err.Description & vbCrLf & _
-                "Command: " & commandLine
+    errorText = "Windows Script Host could not start the setup." & vbCrLf & "Error " & Err.Number & ": " & Err.Description & vbCrLf & "Command: " & commandLine
     Set stream = fso.CreateTextFile(logPath, True, True)
     stream.WriteLine errorText
     stream.Close
-    MsgBox errorText & vbCrLf & vbCrLf & "Diagnostic file:" & vbCrLf & logPath, _
-           vbCritical, "TarteMeter Setup"
+    MsgBox errorText & vbCrLf & vbCrLf & "Diagnostic file:" & vbCrLf & logPath, vbCritical, "TarteMeter Setup"
     WScript.Quit 3
 End If
 
 If exitCode <> 0 Then
-    MsgBox "TarteMeter Setup could not complete." & vbCrLf & vbCrLf & _
-           "Open this diagnostic file:" & vbCrLf & logPath, _
-           vbCritical, "TarteMeter Setup"
+    MsgBox "TarteMeter Setup could not complete." & vbCrLf & vbCrLf & "Open this diagnostic file:" & vbCrLf & logPath, vbCritical, "TarteMeter Setup"
 End If
 
 WScript.Quit exitCode

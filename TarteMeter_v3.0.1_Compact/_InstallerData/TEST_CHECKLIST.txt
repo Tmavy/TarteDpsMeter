@@ -1,0 +1,45 @@
+TarteMeter v3.0.1 Compact - Live Test Checklist
+
+INSTALLER FIRST
+[ ] Extract the entire folder.
+[ ] Double-click TarteMeter Setup.vbs from a path containing spaces.
+[ ] Confirm no Windows Script Host 800A03EA error appears.
+[ ] Complete Install / Update.
+[ ] Confirm LaunchOverlay.vbs can start the overlay fallback.
+
+STARTUP
+[ ] Window opens without startup_error.txt or window_error.txt.
+[ ] Title and badge both show v3.0.1.
+[ ] Minimize, maximize/restore and close icons are centered and easy to click.
+[ ] Maximize icon changes to Restore while maximized.
+[ ] Settings controls retain readable foreground/background contrast.
+
+RESIZE / COMPACT UI
+[ ] Resize repeatedly from minimum to maximum dimensions.
+[ ] At narrow width COMPACT hides first, then the version badge; title controls never overlap.
+[ ] Every character row shows Damage, DPS, share, Hits, Crit, Max and Avg without text overlap.
+[ ] Damage-share fill bars track the displayed percentage.
+[ ] History has no separate Logs tab.
+[ ] Selecting an encounter updates breakdown and Timeline below it.
+
+COMBAT REGRESSION
+[ ] Normal attacks and skills increment exactly once.
+[ ] Damage, DPS, Hits, Crit rate, Max Hit and Avg Hit are correct.
+[ ] Chako auto-attacks are assigned to Chako.
+[ ] Dana command/spin skill damage is assigned to Chako.
+[ ] Chako continues to be assigned correctly after switching away from Dana.
+[ ] Direct attacks by the newly active character remain assigned to that character.
+[ ] Boss phase or actor-ID changes do not reset totals.
+[ ] More than ten seconds idle does not reset totals.
+
+SAVE / HISTORY
+[ ] A long encounter reacts promptly to F6.
+[ ] F6 creates one History entry and one archived Timeline.
+[ ] Repeated F6 while SAVING does not create duplicate commands.
+[ ] A simulated locked output file aborts Reset without clearing current damage.
+
+PROCESS LIFECYCLE
+[ ] F9 hides/shows without terminating the overlay.
+[ ] Title-bar Close fully terminates the TarteMeter PowerShell process.
+[ ] Closing DragonSword terminates the watched overlay process.
+[ ] Steam no longer reports the game running because of TarteMeter.

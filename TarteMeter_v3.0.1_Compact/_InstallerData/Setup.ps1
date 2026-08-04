@@ -4,7 +4,7 @@ $script:DataDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:PayloadDir = [IO.Path]::Combine($script:DataDir, "Payload")
 $script:ModPayload = [IO.Path]::Combine($script:PayloadDir, "Mods", "TarteMeter")
 $script:UE4SSPayload = [IO.Path]::Combine($script:PayloadDir, "UE4SS")
-$script:Version = "2.7.4"
+$script:Version = "3.0.1"
 $script:FatalLog = [IO.Path]::Combine($script:DataDir, "InstallerError.log")
 $script:LogBox = $null
 $script:StatusLabel = $null
@@ -273,7 +273,7 @@ function Disable-LegacyCombatMods {
         $legacyFolder = Join-NativePath $ModsDirectory $folderName
         $legacyEnabled = Join-NativePath $legacyFolder 'enabled.txt'
         if ([IO.File]::Exists($legacyEnabled)) {
-            $disabledPath = Join-NativePath $legacyFolder 'enabled.txt.disabled-by-tartemeter-v274'
+            $disabledPath = Join-NativePath $legacyFolder 'enabled.txt.disabled-by-tartemeter-v275'
             Move-Item -LiteralPath $legacyEnabled -Destination $disabledPath -Force
             Write-SetupLog ("Disabled legacy combat mod enable marker: {0}" -f $legacyEnabled)
         }
@@ -370,6 +370,9 @@ function Install-TarteMeter {
 
     Write-SetupLog 'Installing TarteMeter files...'
     New-Item -ItemType Directory -Path $modTarget -Force | Out-Null
+    New-Item -ItemType Directory `
+        -Path (Join-NativePath $modTarget 'battle_timelines') `
+        -Force | Out-Null
     foreach ($file in Get-RelativeFiles $script:ModPayload) {
         $target = Join-NativePath $modTarget $file.Relative
         New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target)) -Force | Out-Null
@@ -383,6 +386,11 @@ function Install-TarteMeter {
     [IO.File]::WriteAllText(
         (Join-NativePath $modTarget 'installed_version.txt'),
         ('TarteMeter v' + $script:Version + [Environment]::NewLine),
+        $script:Utf8NoBom
+    )
+    [IO.File]::WriteAllText(
+        (Join-NativePath $modTarget 'installed_ui_variant.txt'),
+        ('Compact' + [Environment]::NewLine),
         $script:Utf8NoBom
     )
 
@@ -403,16 +411,36 @@ function Install-TarteMeter {
     $installedWindowText = [IO.File]::ReadAllText($installedWindowScript)
     if (
         $installedWindowText.IndexOf(
-            'TarteMeter v2.7.4',
+            'TarteMeter v3.0.1',
             [StringComparison]::Ordinal
         ) -lt 0 -or
         $installedWindowText.IndexOf(
-            'TarteMeterOverlay_v274',
+            'TarteMeterOverlay_v301',
+            [StringComparison]::Ordinal
+        ) -lt 0 -or
+        $installedWindowText.IndexOf(
+            'window_settings_v11_compact.ini',
+            [StringComparison]::Ordinal
+        ) -lt 0 -or
+        $installedWindowText.IndexOf(
+            'UI_VARIANT_COMPACT',
+            [StringComparison]::Ordinal
+        ) -lt 0 -or
+        $installedWindowText.IndexOf(
+            'TITLEBAR_VECTOR_CONTROLS_V301',
+            [StringComparison]::Ordinal
+        ) -lt 0 -or
+        $installedWindowText.IndexOf(
+            'battle_history_index.tsv',
+            [StringComparison]::Ordinal
+        ) -lt 0 -or
+        $installedWindowText.IndexOf(
+            'ReadUtf8Prefix',
             [StringComparison]::Ordinal
         ) -lt 0
     ) {
         throw (
-            'The v2.7.4 overlay script was not installed correctly. ' +
+            'The v3.0.1 Compact overlay script was not installed correctly. ' +
             'Close every old TarteMeter PowerShell process and run setup again.'
         )
     }
@@ -420,8 +448,11 @@ function Install-TarteMeter {
     $payloadMain = Join-NativePath $script:ModPayload 'Scripts' 'main.lua'
     $installedMainText = [IO.File]::ReadAllText($installedMain)
     if (
-        $installedMainText.IndexOf('TarteMeter v2.7.4', [StringComparison]::Ordinal) -lt 0 -or
+        $installedMainText.IndexOf('TarteMeter v3.0.1', [StringComparison]::Ordinal) -lt 0 -or
         $installedMainText.IndexOf('runtime_singleton_guard=true', [StringComparison]::Ordinal) -lt 0 -or
+        $installedMainText.IndexOf('compact_history_v2=true', [StringComparison]::Ordinal) -lt 0 -or
+        $installedMainText.IndexOf('archived_timeline=true', [StringComparison]::Ordinal) -lt 0 -or
+        $installedMainText.IndexOf('low_memory_event_preview=true', [StringComparison]::Ordinal) -lt 0 -or
         $installedMainText.IndexOf('AUTO_RESET_AFTER_SAVE', [StringComparison]::Ordinal) -ge 0
     ) {
         throw 'The installed combat runtime is stale or invalid. Close the game and run Install / Update again.'
@@ -437,10 +468,10 @@ function Install-TarteMeter {
         [string]::IsNullOrWhiteSpace($payloadWindowHash) -or
         $payloadWindowHash -ne $installedWindowHash
     ) {
-        throw 'Installed TarteMeter program files did not match the v2.7.4 payload.'
+        throw 'Installed TarteMeter program files did not match the v3.0.1 Compact payload.'
     }
 
-    Write-SetupLog 'Verified v2.7.4 main.lua, overlay, hashes, reset guard, and single-instance identifiers.'
+    Write-SetupLog 'Verified v3.0.1 Compact UI, combat runtime, hashes, reset guard, and single-instance identifiers.'
 
 
     # Remove the obsolete visible CMD helper from older releases. The meter
