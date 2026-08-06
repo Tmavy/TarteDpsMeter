@@ -1,0 +1,62 @@
+﻿TarteMeter v3.1.3 — Validation Report
+
+01. PASS Lua 5.4 syntax
+02. PASS Runtime version 3.1.3
+03. PASS Exactly two verified hook paths
+04. PASS Single RegisterHook call site
+05. PASS Single monster FindAllOf call
+06. PASS No Unattributed row
+07. PASS No auto reset marker
+08. PASS AoE ownership marker
+09. PASS AoE TTL 180ms
+10. PASS AoE no-position TTL 60ms
+11. PASS AoE cache bounded 256
+12. PASS AoE spatial bound
+13. PASS AoE cache reset
+14. PASS Active fallback cannot seed
+15. PASS Burst before active fallback
+16. PASS Exact source before burst
+17. PASS Three-phase batch
+18. PASS No extra world scan from AoE
+19. PASS Damage queue limit retained
+20. PASS Batch limit retained
+21. PASS Source record bound retained
+22. PASS Timeline bound retained
+23. PASS No UObject in AoE cache fields
+24. PASS Observed 8369 duplicate captured
+25. PASS Observed 10607 duplicate captured
+26. PASS Synthetic 8369 remains Theresa
+27. PASS Synthetic 10607 at 77ms remains Theresa
+28. PASS Conflicting owners reject propagation
+29. PASS Expired burst rejected
+30. PASS Far target rejected
+31. PASS No-position 50ms accepted
+32. PASS No-position 70ms rejected
+33. PASS Active fallback does not seed
+34. PASS DPSWindow version 3.1.3
+35. PASS Mutex v313
+36. PASS Settings v14
+37. PASS Vector title controls
+38. PASS Setup version 3.1.3
+39. PASS Setup verifies AoE marker
+40. PASS Setup path normalization
+41. PASS No blank line after PowerShell continuation
+42. PASS TarteMeter Setup.vbs ASCII
+43. PASS TarteMeter Setup.vbs no BOM
+44. PASS TarteMeter Setup.vbs CRLF
+45. PASS LaunchOverlay.vbs ASCII
+46. PASS LaunchOverlay.vbs no BOM
+47. PASS LaunchOverlay.vbs CRLF
+48. PASS Embedded XAML found
+49. PASS Embedded XAML XML parse
+50. PASS XAML non-template x:Name unique | 71 names
+51. PASS All FindName refs resolve | []
+52. PASS WPF Grid property ordering | []
+53. PASS Coop diagnostic report present
+54. PASS Coop test INI not in payload
+55. PASS Bundled UE4SS unchanged
+
+TOTAL 55/55 passed
+
+Limitations
+Live Windows Script Host, WPF, DragonSword combat and DragonSword co-op execution were not available in this environment.

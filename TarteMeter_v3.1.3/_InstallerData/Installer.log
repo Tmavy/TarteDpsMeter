@@ -1,0 +1,17 @@
+[19:17:30] DragonSword installation was detected automatically.
+[19:17:32] Removing TarteMeter program files...
+[19:17:32] Removing UE4SS files recorded as installed by TarteMeter Installer...
+[19:17:32] Removed UE4SS file: dwmapi.dll
+[19:17:32] Restored the original file: OpenImageDenoise.dll
+[19:17:32] Restored the original file: tbb.dll
+[19:17:32] Restored the original file: tbb12.dll
+[19:17:32] Restored the original file: tbbmalloc.dll
+[19:17:32] Removed UE4SS file: UE4SS.dll
+[19:17:32] Removed UE4SS file: UE4SS-settings.ini
+[19:17:32] Removal completed. Battle history, exports, themes, key bindings, and window settings remain in Mods\TarteMeter.
+[19:17:33] Installing the bundled UE4SS files...
+[19:17:34] Installing TarteMeter files...
+[19:17:34] Cleared stale live-session state; preserved battle history and archived timelines.
+[19:17:34] Verified v3.1.3 Compact UI, combat runtime, hashes, reset guard, and single-instance identifiers.
+[19:17:34] TarteMeter installation completed successfully.
+[19:17:34] Existing battle history, exports, settings, key bindings, and unrelated mods.txt entries were preserved.

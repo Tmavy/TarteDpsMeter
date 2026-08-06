@@ -1,0 +1,68 @@
+﻿TarteMeter v3.1.3 — Full Runtime Audit
+
+RELEASE SCOPE
+- Based on v3.1.2 Compact Source Ownership.
+- Installer path hotfix retained.
+- Combat formulas, History, Timeline, F6 and manual Reset retained.
+- Runtime change is limited to verified multi-target AoE owner propagation.
+- Bundled UE4SS core is unchanged.
+
+CONFIRMED REGRESSION FROM THE SUPPLIED TIMELINE
+- Theresa 8369 and Dana 8369 were recorded at the same 12.829-second timestamp.
+- Theresa 10607 at 12.870 was followed by Dana 10607 at 12.947.
+- Dana received 20101 total damage; these two suspicious events account for 18976 of it.
+- Root cause: ownership was bound too narrowly to an individual enemy actor. Other enemies hit by the same residual AoE could fall through to the newly active character.
+
+v3.1.3 ATTRIBUTION ORDER
+1. Fresh exact source + exact target.
+2. Concrete target.LastAttacker.
+3. Existing source already bound to the exact target.
+4. Narrow unbound source-to-target binding.
+5. Strict source match when the target cannot be recovered.
+6. Verified multi-target AoE burst owner.
+7. Captured active pawn only as final compatibility fallback.
+
+MULTI-TARGET AoE OWNER RULES
+- An authoritative hit can seed ownership only from an exact source or a concrete LastAttacker result.
+- Active-character fallback never seeds or extends ownership.
+- A propagated result never seeds another chain.
+- Signature requires the same damage value and critical flag.
+- Main time window: 180 ms.
+- Events without usable positions: 60 ms maximum.
+- Maximum spatial separation: 2200 Unreal units.
+- A competing verified owner rejects propagation instead of guessing.
+- Cache limit: 256 plain-data records.
+- Cache is cleared by manual Reset.
+
+PERFORMANCE AND MEMORY
+- No new Unreal hooks.
+- No new FindAllOf call sites or world scans.
+- Existing one-snapshot-per-required-batch model is reused.
+- Damage queue limit: 16384.
+- Batch limit: 384.
+- Source record limit: 512.
+- Monster snapshot limit: 1024.
+- Timeline queue limit: 4096.
+- No UObject is retained in deferred damage, AoE owner, History preview or Timeline queues.
+
+HOOKS
+1. /Script/DS.DsAnimationProjectile:OnAttackBeginOverlap
+2. /Script/DS.DsPlayerController:ClientShowDamageText
+
+RESET AND SAVING
+- AUTO_RESET_AFTER_SAVE is absent.
+- Idle checkpoint does not clear combat totals.
+- Manual Reset remains the only normal clear operation.
+- History and archived Timeline files are retained during install/update.
+
+UE4SS CO-OP FINDING
+- The supplied build is UE4SS v3.0.1 Beta #0, Git SHA d935b5b.
+- The supplied combat log is a solo log and contains no failed remote PostLogin, RestartPlayer, ClientRestart or possession sequence.
+- Therefore it cannot prove the exact point at which remote pawn spawning or possession fails.
+- Official UE4SS issue #452 documents the same d935b5b build breaking multiplayer connections even without custom mods.
+- Official PR #453 fixed that class of problem by replacing process-global SetDefaultDllDirectories behavior with per-library LoadLibraryEx behavior.
+- This is strong evidence against the old UE4SS core, but not proof that DragonSword has the identical defect.
+- For reliable hosting, perform the A/B procedure in the included co-op diagnostic report.
+
+LIVE LIMITATIONS
+Static and synthetic validation was performed in Linux. WPF, Windows Script Host, live DragonSword combat and co-op networking could not be executed here.

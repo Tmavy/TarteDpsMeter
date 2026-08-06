@@ -1,0 +1,34 @@
+TarteMeter v3.1.3 - Compact AoE Source Ownership
+
+MAIN FIX
+- Fixed multi-target AoE damage leaking to the character selected after a swap.
+- A concrete LastAttacker or verified projectile/source now seeds a short, bounded multi-target burst owner.
+- Same-value callbacks from nearby targets in the same 180 ms burst inherit that verified owner only when exactly one owner is possible.
+- Active-character fallback never seeds or extends the burst cache.
+- Exact Chako, Theresa, Roxy, Dana, and other source matches still outrank burst propagation.
+- Conflicting verified owners disable propagation instead of guessing.
+
+OBSERVED TEST CASE
+The supplied timeline contained duplicate AoE values:
+- Theresa 8369 and Dana 8369 at 12.829
+- Theresa 10607 at 12.870 and Dana 10607 at 12.947
+v3.1.3 keeps both targets in the verified Theresa burst after the swap.
+
+PERFORMANCE
+- No new hooks.
+- No additional FindAllOf calls or world scans.
+- Existing single snapshot per required batch is reused.
+- Burst cache contains plain strings, numbers and booleans only.
+- Cache is limited to 256 entries and expires after 180 ms.
+- Cache is cleared on Reset.
+
+UNCHANGED
+- Two verified combat hooks.
+- Damage/DPS/Crit/Hits/Max/Avg formulas.
+- Chako separate row and source recognition.
+- F6 save, History, Timeline and manual Reset.
+- Compact UI and installer path hotfix.
+
+UE4SS CO-OP NOTE
+The bundled UE4SS core was not replaced in this release. See:
+UE4SS COOP DIAGNOSTIC - READ FIRST.txt

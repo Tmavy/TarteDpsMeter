@@ -1,0 +1,19 @@
+﻿TarteMeter v3.1.3 — Live Test Checklist
+
+Attribution
+[ ] Theresa tornado hits several enemies, then swap to Dana: every residual tornado target remains Theresa.
+[ ] The observed 8369 and 10607 duplicate-value cases do not create Dana copies.
+[ ] Dana selected but idle receives no Theresa or Chako damage.
+[ ] Chako attacks several enemies: every confirmed Chako hit remains Chako.
+[ ] Theresa residual AoE and Chako overlap on the same group: neither source steals the other.
+[ ] Roxy/Cerese residual attacks remain on their source character after swap.
+
+Performance
+[ ] Large enemy group produces no visible combat hitch or escalating lag.
+[ ] No callback error, queue overflow or timeline drop appears in dps_meter.txt.
+[ ] F6, History, Timeline and manual Reset remain unchanged.
+
+Co-op A/B
+[ ] Disable only TarteMeter while keeping UE4SS enabled, then host a lobby.
+[ ] Fully disable UE4SS by renaming dwmapi.dll, then repeat with the same players.
+[ ] Save the complete host log and one affected client log from a failed join.

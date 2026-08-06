@@ -1,0 +1,19 @@
+﻿TarteMeter v3.1.3 — Runtime and Crash-Safety Audit
+
+AoE correction
+- Source ownership can propagate across multiple enemy actors only after authoritative source evidence.
+- Active-character fallback cannot create a multi-target owner record.
+- Conflicting owners suppress propagation.
+- Time, distance and capacity limits prevent a stale attack from becoming a global owner.
+
+Safety invariants
+- Exactly two combat hook paths.
+- One RegisterHook wrapper call site.
+- Exactly one FindAllOf("DsMonsterCharacter") call site.
+- No persistent UObject in deferred queues or ownership caches.
+- One conditional monster snapshot per required batch.
+- Bounded queues and caches.
+- Reset clears the new AoE cache.
+- No automatic reset after save.
+
+No network hooks were added. TarteMeter does not hook PostLogin, RestartPlayer, possession, pawn replication or controller replication.

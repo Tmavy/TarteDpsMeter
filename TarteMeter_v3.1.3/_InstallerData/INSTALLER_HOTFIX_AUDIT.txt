@@ -1,0 +1,17 @@
+﻿TarteMeter v3.1.3 — Installer Audit
+
+Retained fixes
+- Browse, Install/Update, Remove and Launch normalize the same absolute DSClient-Win64-Shipping.exe path.
+- PowerShell hashtable splatting is used instead of fragile blank-line continuations.
+- VBS launchers are ASCII without BOM and use strict CRLF.
+- Paths with spaces, OneDrive and Cyrillic characters remain quoted.
+
+Release verification
+- Setup expects version 3.1.3.
+- Setup verifies the runtime marker multi_target_aoe_owner=true.
+- Compact mutex: Local\TarteMeterOverlay_v313.
+- Settings file: window_settings_v14_compact.ini.
+- Installed history and archived timelines are preserved.
+
+UE4SS note
+- Repair UE4SS restores the bundled d935b5b core. Do not use Repair during the co-op A/B test, because it invalidates the comparison.
